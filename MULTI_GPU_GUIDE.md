@@ -128,6 +128,20 @@ scp -r user@server:/path/to/workspace/CVNN-FDA/results ./
 - `scatter_comparison.png` - 预测对比
 - `error_distribution.png` - 误差分布
 
+## ✅ DataParallel 兼容性修复
+
+本实现已修复PyTorch DataParallel对复数张量的兼容性问题：
+
+**修复方案**:
+- Dataset返回2通道实数张量 `[real, imag]` 而非原生复数
+- 模型forward入口自动转换为复数张量
+- 所有中间层正常使用复数运算
+
+**测试**:
+```bash
+python test_multi_gpu.py  # 验证多GPU兼容性
+```
+
 ## 🐛 常见问题
 
 ### Q1: 显存不足 (CUDA out of memory)

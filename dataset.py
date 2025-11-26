@@ -120,7 +120,11 @@ class FDADataset(Dataset):
         
         # 转换为 PyTorch 张量
         # 添加通道维度: (MN, MN) -> (1, MN, MN)
-        R_tensor = numpy_to_torch_complex(R_norm).unsqueeze(0)
+        R_complex = numpy_to_torch_complex(R_norm).unsqueeze(0)
+        
+        # DataParallel 兼容性修复: 将复数张量转换为2通道实数张量 [real, imag]
+        # shape: (1, MN, MN) complex -> (2, MN, MN) float
+        R_tensor = torch.stack([R_complex.real, R_complex.imag], dim=0).squeeze(1)
         
         # 处理标签 (对于单目标,直接使用第一个目标的参数)
         # 对于多目标问题,可以选择主目标或进行其他处理

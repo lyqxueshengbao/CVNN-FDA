@@ -133,12 +133,17 @@ class CVNN_Estimator(nn.Module):
         
         Args:
             x: 输入复数协方差矩阵, shape (batch, 1, 100, 100), dtype=complex64
+                或 2通道实数 (batch, 2, 100, 100) for DataParallel
         
         Returns:
             out: 预测的归一化参数, shape (batch, 2), dtype=float32
                  [0]: 归一化距离 r_norm
                  [1]: 归一化角度 θ_norm
         """
+        # DataParallel 兼容性: 转换2通道实数为复数
+        if not x.is_complex() and x.shape[1] == 2:
+            x = torch.complex(x[:, 0:1], x[:, 1:2])
+        
         # 特征提取
         # Block 1
         x = self.conv1(x)
@@ -233,6 +238,10 @@ class CVNN_Estimator_Light(nn.Module):
         self.to_real = ComplexToReal(mode='abs')
     
     def forward(self, x: Tensor) -> Tensor:
+        # DataParallel 兼容性: 转换2通道实数为复数
+        if not x.is_complex() and x.shape[1] == 2:
+            x = torch.complex(x[:, 0:1], x[:, 1:2])
+        
         # Block 1
         x = self.conv1(x)
         x = self.act1(x)
@@ -321,6 +330,10 @@ class CVNN_Estimator_Deep(nn.Module):
         self.to_real = ComplexToReal(mode='abs')
     
     def forward(self, x: Tensor) -> Tensor:
+        # DataParallel 兼容性: 转换2通道实数为复数
+        if not x.is_complex() and x.shape[1] == 2:
+            x = torch.complex(x[:, 0:1], x[:, 1:2])
+        
         # Block 1
         x = self.act1a(self.bn1a(self.conv1a(x)))
         x = self.act1b(self.bn1b(self.conv1b(x)))
@@ -384,6 +397,10 @@ class ComplexResidualBlock(nn.Module):
         self.act2 = ModReLU(num_features=channels)
     
     def forward(self, x: Tensor) -> Tensor:
+        # DataParallel 兼容性: 转换2通道实数为复数
+        if not x.is_complex() and x.shape[1] == 2:
+            x = torch.complex(x[:, 0:1], x[:, 1:2])
+        
         identity = x
         out = self.act1(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
@@ -487,6 +504,14 @@ class CVNN_Estimator_Pro(nn.Module):
                     nn.init.zeros_(m.linear_imag.bias)
     
     def forward(self, x: Tensor) -> Tensor:
+        # DataParallel 兼容性修复: 将2通道实数输入转换为复数
+        # 输入: (batch, 2, H, W) float -> (batch, 1, H, W) complex
+        if not x.is_complex():
+            if x.shape[1] == 2:  # [real, imag] 格式
+                x = torch.complex(x[:, 0:1], x[:, 1:2])
+            else:
+                raise TypeError(f"Input must be complex or 2-channel real, got shape={x.shape}")
+        
         # Stage 1: 初始卷积
         x = self.act_in(self.bn_in(self.conv_in(x)))
         
