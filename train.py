@@ -123,7 +123,8 @@ class Trainer:
                  weight_decay: float = WEIGHT_DECAY,
                  lambda_angle: float = 1.0,
                  device: torch.device = DEVICE,
-                 save_path: str = MODEL_SAVE_PATH):
+                 save_path: str = MODEL_SAVE_PATH,
+                 use_multi_gpu: bool = True):
         """
         初始化训练器
         
@@ -136,12 +137,23 @@ class Trainer:
             lambda_angle: 角度损失权重
             device: 训练设备
             save_path: 模型保存路径
+            use_multi_gpu: 是否使用多GPU (DataParallel)
         """
-        self.model = model.to(device)
+        self.device = device
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.device = device
         self.save_path = save_path
+        
+        # 多GPU支持
+        self.use_multi_gpu = use_multi_gpu and torch.cuda.device_count() > 1
+        if self.use_multi_gpu:
+            print(f"使用 {torch.cuda.device_count()} 个GPU进行训练")
+            model = model.to(device)
+            self.model = nn.DataParallel(model)
+            self.model_without_ddp = model  # 保存原始模型用于保存权重
+        else:
+            self.model = model.to(device)
+            self.model_without_ddp = self.model
         
         # 创建保存目录
         os.makedirs(save_path, exist_ok=True)
@@ -378,8 +390,10 @@ class Trainer:
     def save_model(self, filename: str):
         """保存模型"""
         filepath = os.path.join(self.save_path, filename)
+        # 如果使用DataParallel，保存原始模型的state_dict
+        model_to_save = self.model_without_ddp if self.use_multi_gpu else self.model
         torch.save({
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'best_val_loss': self.best_val_loss,
@@ -391,7 +405,9 @@ class Trainer:
         """加载模型"""
         filepath = os.path.join(self.save_path, filename)
         checkpoint = torch.load(filepath, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        # 加载到原始模型
+        model_to_load = self.model_without_ddp if self.use_multi_gpu else self.model
+        model_to_load.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.best_val_loss = checkpoint['best_val_loss']

@@ -155,24 +155,41 @@ def compute_sample_covariance_matrix(Y: np.ndarray) -> np.ndarray:
     return R  # (MN, MN)
 
 
-def complex_normalize(R: np.ndarray) -> np.ndarray:
+def complex_normalize(R: np.ndarray, method: str = 'trace') -> np.ndarray:
     """
     复数矩阵归一化
     
-    方案: 除以矩阵最大模值
-    R_norm = R / max(|R|)
-    
     Args:
         R: 复数矩阵
+        method: 归一化方法 ('trace', 'frobenius', 'max')
+            - 'trace': 除以矩阵迹 (推荐，保留信号结构)
+            - 'frobenius': 除以Frobenius范数
+            - 'max': 除以最大模值
     
     Returns:
         R_norm: 归一化后的复数矩阵
     """
-    max_abs = np.max(np.abs(R))
-    if max_abs > 0:
-        R_norm = R / max_abs
-    else:
-        R_norm = R
+    if method == 'trace':
+        # 迹归一化：保留协方差矩阵的相对结构
+        trace_val = np.abs(np.trace(R))
+        if trace_val > 0:
+            R_norm = R / trace_val
+        else:
+            R_norm = R
+    elif method == 'frobenius':
+        # Frobenius范数归一化
+        frob_norm = np.linalg.norm(R, 'fro')
+        if frob_norm > 0:
+            R_norm = R / frob_norm
+        else:
+            R_norm = R
+    else:  # 'max'
+        # 最大模值归一化
+        max_abs = np.max(np.abs(R))
+        if max_abs > 0:
+            R_norm = R / max_abs
+        else:
+            R_norm = R
     return R_norm
 
 

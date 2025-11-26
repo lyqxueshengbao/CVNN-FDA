@@ -307,7 +307,7 @@ class ModReLU(nn.Module):
     - 只对幅度应用 ReLU,相位保持不变
     """
     
-    def __init__(self, num_features: Optional[int] = None, bias_init: float = 0.0):
+    def __init__(self, num_features: Optional[int] = None, bias_init: float = 0.5):
         """
         初始化 ModReLU
         

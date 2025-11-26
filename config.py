@@ -22,7 +22,7 @@ d = c / (2 * f0)                # 阵元间距 (Element spacing) [m], 即 0.15m
 # =============================================================================
 # 数据生成参数 (Data Generation Parameters)
 # =============================================================================
-L_snapshots = 200               # 快拍数 (Number of snapshots)
+L_snapshots = 500               # 快拍数 (Number of snapshots) - 增加以提高协方差矩阵质量
 K_targets_max = 2               # 最大目标数 (Maximum number of targets)
 
 # 目标参数范围 (Target parameter ranges)
@@ -34,15 +34,15 @@ theta_max = 60                  # 最大角度 [degrees]
 # =============================================================================
 # 训练参数 (Training Parameters)
 # =============================================================================
-BATCH_SIZE = 64                 # 批大小
+BATCH_SIZE = 32                 # 批大小 (减小以适应更大模型)
 NUM_EPOCHS = 100                # 训练轮数
-LEARNING_RATE = 1e-4            # 学习率
-WEIGHT_DECAY = 1e-5             # 权重衰减
+LEARNING_RATE = 5e-5            # 学习率 (降低以获得更稳定的训练)
+WEIGHT_DECAY = 1e-4             # 权重衰减 (增大以防止过拟合)
 
 # 数据集大小
-TRAIN_SIZE = 10000              # 训练集样本数
-VAL_SIZE = 2000                 # 验证集样本数
-TEST_SIZE = 2000                # 测试集样本数
+TRAIN_SIZE = 30000              # 训练集样本数 (增大3倍)
+VAL_SIZE = 5000                 # 验证集样本数
+TEST_SIZE = 3000                # 测试集样本数
 
 # SNR 范围 (用于训练和测试)
 SNR_TRAIN_MIN = -10             # 训练时最小SNR [dB]

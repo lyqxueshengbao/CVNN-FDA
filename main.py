@@ -56,6 +56,7 @@ def train_model(args):
         val_size=args.val_size,
         test_size=args.test_size,
         batch_size=args.batch_size,
+        num_workers=args.num_workers,
         snr_range=(SNR_TRAIN_MIN, SNR_TRAIN_MAX)
     )
     print(f"  ✓ 训练集: {args.train_size} 样本")
@@ -83,7 +84,8 @@ def train_model(args):
         weight_decay=args.weight_decay,
         lambda_angle=args.lambda_angle,
         device=DEVICE,
-        save_path=MODEL_SAVE_PATH
+        save_path=MODEL_SAVE_PATH,
+        use_multi_gpu=args.multi_gpu
     )
     print("  ✓ 优化器: Adam")
     print(f"  ✓ 学习率: {args.lr}")
@@ -234,7 +236,7 @@ def main():
     
     # 模型参数
     parser.add_argument('--model', type=str, default='standard',
-                       choices=['standard', 'light', 'deep'],
+                       choices=['standard', 'light', 'deep', 'pro'],
                        help='模型类型')
     parser.add_argument('--model_path', type=str, default='./checkpoints/best_model.pth',
                        help='模型路径 (用于评估)')
@@ -256,6 +258,10 @@ def main():
                        help='早停耐心值')
     parser.add_argument('--use_bn', action='store_true', default=True,
                        help='使用批归一化')
+    parser.add_argument('--multi_gpu', action='store_true', default=True,
+                       help='使用多GPU训练 (DataParallel)')
+    parser.add_argument('--num_workers', type=int, default=4,
+                       help='数据加载线程数')
     
     # 数据集参数
     parser.add_argument('--train_size', type=int, default=TRAIN_SIZE,
