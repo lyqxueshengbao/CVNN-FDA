@@ -29,6 +29,7 @@ from config import (
     MODEL_SAVE_PATH, RESULTS_PATH
 )
 from dataset import create_dataloaders
+from dataset_cached import create_dataloaders_cached
 from model import get_model, count_parameters
 from train import Trainer
 from evaluate import (
@@ -51,14 +52,27 @@ def train_model(args):
     
     # 创建数据加载器
     print("\n[1/5] 创建数据集...")
-    train_loader, val_loader, test_loader = create_dataloaders(
-        train_size=args.train_size,
-        val_size=args.val_size,
-        test_size=args.test_size,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        snr_range=(SNR_TRAIN_MIN, SNR_TRAIN_MAX)
-    )
+    if args.use_cache:
+        print("  使用缓存模式 (预生成数据到内存)")
+        train_loader, val_loader, test_loader = create_dataloaders_cached(
+            train_size=args.train_size,
+            val_size=args.val_size,
+            test_size=args.test_size,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            snr_train_range=(SNR_TRAIN_MIN, SNR_TRAIN_MAX),
+            verbose=True
+        )
+    else:
+        print("  使用动态生成模式 (实时计算)")
+        train_loader, val_loader, test_loader = create_dataloaders(
+            train_size=args.train_size,
+            val_size=args.val_size,
+            test_size=args.test_size,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            snr_range=(SNR_TRAIN_MIN, SNR_TRAIN_MAX)
+        )
     print(f"  ✓ 训练集: {args.train_size} 样本")
     print(f"  ✓ 验证集: {args.val_size} 样本")
     print(f"  ✓ 测试集: {args.test_size} 样本")
@@ -262,6 +276,8 @@ def main():
                        help='使用多GPU训练 (DataParallel)')
     parser.add_argument('--num_workers', type=int, default=4,
                        help='数据加载线程数')
+    parser.add_argument('--use_cache', action='store_true', default=False,
+                       help='使用缓存数据集 (预生成到内存,降低CPU占用)')
     
     # 数据集参数
     parser.add_argument('--train_size', type=int, default=TRAIN_SIZE,

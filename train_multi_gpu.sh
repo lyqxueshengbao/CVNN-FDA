@@ -29,7 +29,8 @@ nohup python main.py \
     --train_size 30000 \
     --val_size 5000 \
     --test_size 3000 \
-    --num_workers 16 \
+    --num_workers 4 \
+    --use_cache \
     --multi_gpu > $LOG_FILE 2>&1 &
 
 # 获取训练进程PID
