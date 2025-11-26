@@ -185,8 +185,8 @@ class CVNN_Estimator(nn.Module):
         # 输出层
         x = self.fc_out(x)  # (batch, 2) complex
         
-        # 转为实数 (取模)
-        out = self.to_real(x)  # (batch, 2) real
+        # 转为实数 (取模) + Sigmoid约束到[0,1]
+        out = torch.sigmoid(self.to_real(x))  # (batch, 2) real, range [0,1]
         
         return out
 
@@ -263,9 +263,9 @@ class CVNN_Estimator_Light(nn.Module):
         x = self.act_fc1(x)
         x = self.dropout(x)
         
-        # 输出
+        # 输出 + Sigmoid约束到[0,1]
         x = self.fc_out(x)
-        out = self.to_real(x)
+        out = torch.sigmoid(self.to_real(x))
         
         return out
 
@@ -354,9 +354,9 @@ class CVNN_Estimator_Deep(nn.Module):
         x = self.dropout1(self.act_fc1(self.bn_fc1(self.fc1(x))))
         x = self.dropout2(self.act_fc2(self.bn_fc2(self.fc2(x))))
         
-        # 输出
+        # 输出 + Sigmoid约束到[0,1]
         x = self.fc_out(x)
-        out = self.to_real(x)
+        out = torch.sigmoid(self.to_real(x))
         
         return out
 
@@ -541,9 +541,9 @@ class CVNN_Estimator_Pro(nn.Module):
         x = self.dropout1(self.act_fc1(self.bn_fc1(self.fc1(x))))
         x = self.dropout2(self.act_fc2(self.bn_fc2(self.fc2(x))))
         
-        # 输出
+        # 输出 + Sigmoid约束到[0,1]
         x = self.fc_out(x)
-        out = self.to_real(x)
+        out = torch.sigmoid(self.to_real(x))
         
         return out
 
