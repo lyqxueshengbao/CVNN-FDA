@@ -72,36 +72,53 @@ def create_model(model_name='cvnn', dropout_rate=0.2, num_gpus=1):
     return model
 
 
-def train_epoch(model, train_loader, criterion, optimizer, scaler=None):
-    """训练一个epoch"""
+def train_epoch(model, train_loader, criterion, optimizer, scaler=None, accumulation_steps=1):
+    """训练一个epoch (支持梯度累积)"""
     model.train()
     total_loss = 0
     num_batches = 0
+    optimizer.zero_grad()
     
     for batch_idx, (x, y, _) in enumerate(train_loader):
         x, y = x.cuda(non_blocking=True), y.cuda(non_blocking=True)
-        
-        optimizer.zero_grad()
         
         # 混合精度训练 (可选)
         if scaler is not None:
             with torch.cuda.amp.autocast():
                 out = model(x)
-                loss = criterion(out, y)
+                loss = criterion(out, y) / accumulation_steps
             scaler.scale(loss).backward()
+            
+            if (batch_idx + 1) % accumulation_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+        else:
+            out = model(x)
+            loss = criterion(out, y) / accumulation_steps
+            loss.backward()
+            
+            if (batch_idx + 1) % accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+        
+        total_loss += loss.item() * accumulation_steps
+        num_batches += 1
+    
+    # 处理最后不足accumulation_steps的批次
+    if num_batches % accumulation_steps != 0:
+        if scaler is not None:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            out = model(x)
-            loss = criterion(out, y)
-            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-        
-        total_loss += loss.item()
-        num_batches += 1
+        optimizer.zero_grad()
     
     return total_loss / num_batches
 
@@ -170,7 +187,8 @@ def main():
     
     # 训练参数
     parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=256, help='批大小 (会自动按GPU数缩放)')
+    parser.add_argument('--batch_size', type=int, default=32, help='每GPU批大小')
+    parser.add_argument('--accumulation_steps', type=int, default=4, help='梯度累积步数')
     parser.add_argument('--lr', type=float, default=1e-3, help='初始学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='权重衰减')
     parser.add_argument('--warmup_epochs', type=int, default=5, help='预热轮数')
@@ -201,8 +219,8 @@ def main():
         sys.exit(1)
     
     # 根据GPU数量调整batch_size
-    effective_batch_size = args.batch_size * num_gpus
-    print(f"\n有效批大小: {args.batch_size} × {num_gpus} GPU = {effective_batch_size}")
+    effective_batch_size = args.batch_size * num_gpus * args.accumulation_steps
+    print(f"\n有效批大小: {args.batch_size} × {num_gpus} GPU × {args.accumulation_steps} 累积 = {effective_batch_size}")
     
     # 创建保存目录
     os.makedirs(args.save_dir, exist_ok=True)
@@ -280,8 +298,8 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         epoch_start_time = time.time()
         
-        # 训练
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler)
+        # 训练 (带梯度累积)
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler, args.accumulation_steps)
         
         # 验证
         val_metrics = evaluate(model, val_loader)

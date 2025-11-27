@@ -12,9 +12,10 @@ set EPOCHS=100
 set TRAIN_SIZE=100000
 set VAL_SIZE=20000
 set TEST_SIZE=10000
-set BATCH_SIZE=128
+set BATCH_SIZE=32
+set ACCUM_STEPS=4
 set LR=1e-3
-set NUM_WORKERS=16
+set NUM_WORKERS=8
 
 echo ======================================
 echo FDA-MIMO CVNN 6-GPU Training
@@ -22,6 +23,7 @@ echo ======================================
 echo GPUs: %CUDA_VISIBLE_DEVICES%
 echo Epochs: %EPOCHS%
 echo Train Size: %TRAIN_SIZE%
+echo Batch: %BATCH_SIZE% x 6 GPU x %ACCUM_STEPS% accum
 echo ======================================
 
 python train_multi_gpu.py ^
@@ -31,6 +33,7 @@ python train_multi_gpu.py ^
     --val_size %VAL_SIZE% ^
     --test_size %TEST_SIZE% ^
     --batch_size %BATCH_SIZE% ^
+    --accumulation_steps %ACCUM_STEPS% ^
     --lr %LR% ^
     --num_workers %NUM_WORKERS% ^
     --save_dir ./checkpoints ^
