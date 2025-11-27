@@ -29,7 +29,6 @@ from config import (
     MODEL_SAVE_PATH, RESULTS_PATH
 )
 from dataset import create_dataloaders
-from dataset_cached import create_dataloaders_cached
 from model import get_model, count_parameters
 from train import Trainer
 from evaluate import (
@@ -52,47 +51,24 @@ def train_model(args):
     
     # 创建数据加载器
     print("\n[1/5] 创建数据集...")
-    if args.use_cache:
-        print("  使用缓存模式 (预生成数据到内存)")
-        train_loader, val_loader, test_loader = create_dataloaders_cached(
-            train_size=args.train_size,
-            val_size=args.val_size,
-            test_size=args.test_size,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            snr_train_range=(SNR_TRAIN_MIN, SNR_TRAIN_MAX),
-            verbose=True
-        )
-    else:
-        print("  使用动态生成模式 (实时计算)")
-        train_loader, val_loader, test_loader = create_dataloaders(
-            train_size=args.train_size,
-            val_size=args.val_size,
-            test_size=args.test_size,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            snr_range=(SNR_TRAIN_MIN, SNR_TRAIN_MAX)
-        )
+    train_loader, val_loader, test_loader = create_dataloaders(
+        train_size=args.train_size,
+        val_size=args.val_size,
+        test_size=args.test_size,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        snr_range=(SNR_TRAIN_MIN, SNR_TRAIN_MAX)
+    )
     print(f"  ✓ 训练集: {args.train_size} 样本")
     print(f"  ✓ 验证集: {args.val_size} 样本")
     print(f"  ✓ 测试集: {args.test_size} 样本")
     
     # 创建模型
     print("\n[2/5] 创建模型...")
-    # 根据模型类型决定传入的参数
-    if args.model.startswith('real'):
-        # 实值CNN模型只需要dropout_rate
-        model = get_model(
-            model_name=args.model,
-            dropout_rate=args.dropout
-        )
-    else:
-        # CVNN模型需要额外参数
-        model = get_model(
-            model_name=args.model,
-            dropout_rate=args.dropout,
-            use_batchnorm=args.use_bn
-        )
+    model = get_model(
+        model_name=args.model,
+        dropout_rate=args.dropout
+    )
     print(f"  ✓ 模型类型: {args.model}")
     print(f"  ✓ 参数数量: {count_parameters(model):,}")
     print(f"  ✓ 设备: {DEVICE}")
@@ -147,8 +123,7 @@ def evaluate_model_main(args):
     print("\n[1/4] 加载模型...")
     model = get_model(
         model_name=args.model,
-        dropout_rate=0.0,  # 评估时不使用 dropout
-        use_batchnorm=args.use_bn
+        dropout_rate=0.0  # 评估时不使用 dropout
     )
     
     if not os.path.exists(args.model_path):
@@ -258,10 +233,9 @@ def main():
                        help='运行模式')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='real_deep',
-                       choices=['standard', 'light', 'deep', 'pro', 
-                                'real', 'real_light', 'real_deep', 'real_pro'],
-                       help='模型类型 (推荐使用real_deep或real_pro)')
+    parser.add_argument('--model', type=str, default='cvnn',
+                       choices=['cvnn', 'cvnn_improved', 'real', 'real_cnn'],
+                       help='模型类型 (推荐使用cvnn)')
     parser.add_argument('--model_path', type=str, default='./checkpoints/best_model.pth',
                        help='模型路径 (用于评估)')
     
@@ -280,14 +254,10 @@ def main():
                        help='角度损失权重')
     parser.add_argument('--patience', type=int, default=15,
                        help='早停耐心值')
-    parser.add_argument('--use_bn', action='store_true', default=True,
-                       help='使用批归一化')
     parser.add_argument('--multi_gpu', action='store_true', default=True,
                        help='使用多GPU训练 (DataParallel)')
     parser.add_argument('--num_workers', type=int, default=4,
                        help='数据加载线程数')
-    parser.add_argument('--use_cache', action='store_true', default=False,
-                       help='使用缓存数据集 (预生成到内存,降低CPU占用)')
     
     # 数据集参数
     parser.add_argument('--train_size', type=int, default=TRAIN_SIZE,
