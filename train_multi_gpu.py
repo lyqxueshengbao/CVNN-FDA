@@ -218,8 +218,7 @@ def main():
         val_size=args.val_size,
         test_size=args.test_size,
         batch_size=effective_batch_size,
-        num_workers=args.num_workers,
-        pin_memory=True
+        num_workers=args.num_workers
     )
     
     # ==================== 模型创建 ====================
