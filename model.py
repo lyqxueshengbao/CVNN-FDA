@@ -81,7 +81,7 @@ class CVNN_Improved(nn.Module):
         # Block 1: 1 -> 32 channels
         self.conv1a = ComplexConv2d(1, 32, kernel_size=3, padding=1)
         self.bn1a = ComplexBatchNorm2d(32)
-        self.act1a = ModReLU(32, bias_init=-0.5)  # 负偏置引入非线性
+        self.act1a = ModReLU(32, bias_init=-0.5)  # 负偏置引入强非线性
         self.conv1b = ComplexConv2d(32, 32, kernel_size=3, padding=1)
         self.bn1b = ComplexBatchNorm2d(32)
         self.act1b = ModReLU(32, bias_init=-0.5)
@@ -100,7 +100,7 @@ class CVNN_Improved(nn.Module):
         self.conv3a = ComplexConv2d(64, 128, kernel_size=3, padding=1)
         self.bn3a = ComplexBatchNorm2d(128)
         self.act3a = ModReLU(128, bias_init=-0.5)
-        self.pool3 = nn.AdaptiveAvgPool2d(1)  # Global Average Pooling
+        self.pool3 = ComplexAvgPool2d(25)  # Global Average Pooling: 25x25 -> 1x1
         
         # 实值输出层
         self.flatten = ComplexFlatten()
@@ -137,7 +137,7 @@ class CVNN_Improved(nn.Module):
         
         # Block 3
         x = self.act3a(self.bn3a(self.conv3a(x)))
-        x = torch.complex(self.pool3(x.real), self.pool3(x.imag))
+        x = self.pool3(x)  # 复数全局平均池化
         
         # 输出层: 复数 -> 实数
         x = self.flatten(x)  # (batch, 128) complex
