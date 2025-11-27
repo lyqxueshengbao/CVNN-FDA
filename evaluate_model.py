@@ -99,7 +99,7 @@ def main():
     parser.add_argument('--snr', type=float, default=10.0,
                         help='测试SNR (dB)')
     parser.add_argument('--snr_range', type=str, default=None,
-                        help='SNR范围，如 "-10,20"，优先于--snr')
+                        help='SNR范围，格式: "min,max"，优先于--snr')
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
@@ -112,7 +112,7 @@ def main():
     
     # 加载模型
     print(f"\n加载模型: {args.checkpoint}")
-    model = CVNN_Improved(input_channels=2, output_size=2)
+    model = CVNN_Improved()  # 使用默认参数
     
     checkpoint = torch.load(args.checkpoint, map_location=device)
     state_dict = checkpoint['model_state_dict']
@@ -132,7 +132,8 @@ def main():
     
     # 确定SNR
     if args.snr_range:
-        snr_min, snr_max = map(float, args.snr_range.split(','))
+        parts = args.snr_range.split(',')
+        snr_min, snr_max = float(parts[0]), float(parts[1])
         snr_list = [snr_min + (snr_max - snr_min) * i / 6 for i in range(7)]
         print(f"\n测试多个SNR: {[f'{s:.1f}dB' for s in snr_list]}")
     else:
