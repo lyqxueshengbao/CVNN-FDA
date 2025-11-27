@@ -1,5 +1,5 @@
 #!/bin/bash
-# FDA-MIMO CVNN 6卡训练脚本
+# FDA-MIMO CVNN 6卡训练脚本 (预缓存版)
 # 
 # 使用方法:
 #   chmod +x run_6gpu.sh
@@ -8,22 +8,22 @@
 # 指定使用的GPU (0-5)
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
 
-# 设置环境变量优化多GPU训练
-export OMP_NUM_THREADS=8
-export MKL_NUM_THREADS=8
+# 设置环境变量
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
 
 # 训练参数
 EPOCHS=100
-TRAIN_SIZE=100000
-VAL_SIZE=20000
-TEST_SIZE=10000
-BATCH_SIZE=32         # 每个GPU的batch_size (减小以节省显存)
-ACCUM_STEPS=4         # 梯度累积步数，实际batch = 32 × 6 × 4 = 768
-LR=1e-3
-NUM_WORKERS=8         # 数据加载线程数
+TRAIN_SIZE=50000      # 预生成到内存，注意内存占用
+VAL_SIZE=10000
+TEST_SIZE=5000
+BATCH_SIZE=64         # 每个GPU的batch_size
+ACCUM_STEPS=2         # 梯度累积，实际batch = 64 × 6 × 2 = 768
+LR=5e-4
+NUM_WORKERS=4         # 数据已在内存，不需要太多worker
 
 echo "======================================"
-echo "FDA-MIMO CVNN 6-GPU 训练"
+echo "FDA-MIMO CVNN 6-GPU 训练 (预缓存版)"
 echo "======================================"
 echo "GPUs: $CUDA_VISIBLE_DEVICES"
 echo "Epochs: $EPOCHS"
