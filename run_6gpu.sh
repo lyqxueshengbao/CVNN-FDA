@@ -20,14 +20,16 @@ TEST_SIZE=5000
 BATCH_SIZE=64         # 每个GPU的batch_size
 ACCUM_STEPS=2         # 梯度累积，实际batch = 64 × 6 × 2 = 768
 LR=5e-4
+SNR=10                # 固定SNR = 10dB (与论文一致)
 NUM_WORKERS=4         # 数据已在内存，不需要太多worker
 
 echo "======================================"
-echo "FDA-MIMO CVNN 6-GPU 训练 (预缓存版)"
+echo "FDA-MIMO CVNN 6-GPU 训练 (固定SNR版)"
 echo "======================================"
 echo "GPUs: $CUDA_VISIBLE_DEVICES"
 echo "Epochs: $EPOCHS"
 echo "Train Size: $TRAIN_SIZE"
+echo "SNR: $SNR dB (固定)"
 echo "Batch Size: $BATCH_SIZE × 6 GPU × $ACCUM_STEPS accum = $((BATCH_SIZE * 6 * ACCUM_STEPS))"
 echo "======================================"
 
@@ -40,6 +42,7 @@ python train_multi_gpu.py \
     --batch_size $BATCH_SIZE \
     --accumulation_steps $ACCUM_STEPS \
     --lr $LR \
+    --snr $SNR \
     --num_workers $NUM_WORKERS \
     --save_dir ./checkpoints \
     --log_interval 1 \

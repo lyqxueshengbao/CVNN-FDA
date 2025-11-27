@@ -51,9 +51,15 @@ def setup_environment():
     return num_gpus
 
 
-def generate_dataset_cached(num_samples, snr_range, seed=42, desc="生成数据"):
+def generate_dataset_cached(num_samples, snr, seed=42, desc="生成数据"):
     """
     预生成数据集到内存 (解决CPU瓶颈)
+    
+    Args:
+        num_samples: 样本数
+        snr: 固定SNR值 (dB)
+        seed: 随机种子
+        desc: 进度条描述
     
     Returns:
         data: (N, 2, MN, MN) float32 tensor [real, imag channels]
@@ -70,9 +76,8 @@ def generate_dataset_cached(num_samples, snr_range, seed=42, desc="生成数据"
         # 随机生成目标参数
         r = np.random.uniform(r_min, r_max)
         theta = np.random.uniform(theta_min, theta_max)
-        snr = np.random.uniform(snr_range[0], snr_range[1])
         
-        # 生成信号和协方差矩阵
+        # 生成信号和协方差矩阵 (固定SNR)
         targets = [(r, theta)]
         Y = generate_echo_signal(targets, snr, L_snapshots)
         R = compute_sample_covariance_matrix(Y)
@@ -97,20 +102,20 @@ def generate_dataset_cached(num_samples, snr_range, seed=42, desc="生成数据"
     return data, labels, raw_labels
 
 
-def create_cached_dataloaders(train_size, val_size, test_size, batch_size, num_workers=4):
-    """创建预缓存的数据加载器"""
+def create_cached_dataloaders(train_size, val_size, test_size, batch_size, snr=10.0, num_workers=4):
+    """创建预缓存的数据加载器 (固定SNR)"""
     
-    print("\n预生成数据集到内存...")
+    print(f"\n预生成数据集到内存 (固定 SNR = {snr} dB)...")
     
-    # 生成数据
+    # 生成数据 (固定SNR)
     train_data, train_labels, train_raw = generate_dataset_cached(
-        train_size, (SNR_TRAIN_MIN, SNR_TRAIN_MAX), seed=42, desc="训练集"
+        train_size, snr=snr, seed=42, desc="训练集"
     )
     val_data, val_labels, val_raw = generate_dataset_cached(
-        val_size, (SNR_TRAIN_MIN, SNR_TRAIN_MAX), seed=123, desc="验证集"
+        val_size, snr=snr, seed=123, desc="验证集"
     )
     test_data, test_labels, test_raw = generate_dataset_cached(
-        test_size, (SNR_TRAIN_MIN, SNR_TRAIN_MAX), seed=456, desc="测试集"
+        test_size, snr=snr, seed=456, desc="测试集"
     )
     
     print(f"\n数据集大小: 训练={train_data.shape}, 验证={val_data.shape}, 测试={test_data.shape}")
@@ -244,6 +249,7 @@ def main():
     parser.add_argument('--train_size', type=int, default=50000)
     parser.add_argument('--val_size', type=int, default=10000)
     parser.add_argument('--test_size', type=int, default=5000)
+    parser.add_argument('--snr', type=float, default=10.0, help='固定SNR (dB)')
     parser.add_argument('--num_workers', type=int, default=4)
     
     parser.add_argument('--save_dir', type=str, default='./checkpoints')
@@ -272,6 +278,7 @@ def main():
     train_loader, val_loader, test_loader = create_cached_dataloaders(
         args.train_size, args.val_size, args.test_size,
         batch_size=args.batch_size * num_gpus,
+        snr=args.snr,
         num_workers=args.num_workers
     )
     
@@ -357,10 +364,17 @@ def main():
     
     print(f"\n测试集: RMSE_r={test_metrics['rmse_r']:.1f}m, RMSE_θ={test_metrics['rmse_theta']:.2f}°")
     
-    # 保存历史
+    # 保存历史 (转换numpy类型为Python原生类型)
+    save_data = {
+        'args': vars(args), 
+        'num_gpus': num_gpus, 
+        'best_rmse_r': float(best_rmse_r),
+        'test_metrics': {k: float(v) for k, v in test_metrics.items()}, 
+        'history': [{k: float(v) if isinstance(v, (np.floating, np.integer)) else v 
+                     for k, v in h.items()} for h in history]
+    }
     with open(os.path.join(args.save_dir, 'training_history.json'), 'w') as f:
-        json.dump({'args': vars(args), 'num_gpus': num_gpus, 'best_rmse_r': best_rmse_r,
-                   'test_metrics': test_metrics, 'history': history}, f, indent=2)
+        json.dump(save_data, f, indent=2)
     
     print("\n" + "=" * 70)
     print("完成!")
