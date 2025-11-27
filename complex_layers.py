@@ -305,15 +305,19 @@ class ModReLU(nn.Module):
     - 保持相位不变 (Phase preservation)
     - b 是可学习的偏置参数
     - 只对幅度应用 ReLU,相位保持不变
+    
+    重要: bias_init 应该初始化为小负值或0，不要用正值！
+    - 正偏置会导致 ReLU(|z| + b) = |z| + b (永远非零)，失去非线性
+    - 负偏置会使小幅度信号被置零，保留真正的门控效果
     """
     
-    def __init__(self, num_features: Optional[int] = None, bias_init: float = 0.5):
+    def __init__(self, num_features: Optional[int] = None, bias_init: float = -0.1):
         """
         初始化 ModReLU
         
         Args:
             num_features: 特征数 (如果为 None,使用全局偏置)
-            bias_init: 偏置初始化值
+            bias_init: 偏置初始化值 (建议: -0.1 到 0.0)
         """
         super(ModReLU, self).__init__()
         

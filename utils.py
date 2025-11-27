@@ -161,16 +161,16 @@ def complex_normalize(R: np.ndarray, method: str = 'trace') -> np.ndarray:
     
     Args:
         R: 复数矩阵
-        method: 归一化方法 ('trace', 'frobenius', 'max')
-            - 'trace': 除以矩阵迹 (推荐，保留信号结构)
+        method: 归一化方法
+            - 'trace': 除以矩阵迹 (原始方法)
             - 'frobenius': 除以Frobenius范数
-            - 'max': 除以最大模值
+            - 'max_scale': 除以最大模值
     
     Returns:
         R_norm: 归一化后的复数矩阵
     """
     if method == 'trace':
-        # 迹归一化：保留协方差矩阵的相对结构
+        # 迹归一化
         trace_val = np.abs(np.trace(R))
         if trace_val > 0:
             R_norm = R / trace_val
@@ -183,11 +183,18 @@ def complex_normalize(R: np.ndarray, method: str = 'trace') -> np.ndarray:
             R_norm = R / frob_norm
         else:
             R_norm = R
-    else:  # 'max'
+    elif method == 'max_scale':
         # 最大模值归一化
         max_abs = np.max(np.abs(R))
         if max_abs > 0:
             R_norm = R / max_abs
+        else:
+            R_norm = R
+    else:
+        # 默认trace
+        trace_val = np.abs(np.trace(R))
+        if trace_val > 0:
+            R_norm = R / trace_val
         else:
             R_norm = R
     return R_norm

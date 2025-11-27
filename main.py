@@ -79,11 +79,20 @@ def train_model(args):
     
     # 创建模型
     print("\n[2/5] 创建模型...")
-    model = get_model(
-        model_name=args.model,
-        dropout_rate=args.dropout,
-        use_batchnorm=args.use_bn
-    )
+    # 根据模型类型决定传入的参数
+    if args.model.startswith('real'):
+        # 实值CNN模型只需要dropout_rate
+        model = get_model(
+            model_name=args.model,
+            dropout_rate=args.dropout
+        )
+    else:
+        # CVNN模型需要额外参数
+        model = get_model(
+            model_name=args.model,
+            dropout_rate=args.dropout,
+            use_batchnorm=args.use_bn
+        )
     print(f"  ✓ 模型类型: {args.model}")
     print(f"  ✓ 参数数量: {count_parameters(model):,}")
     print(f"  ✓ 设备: {DEVICE}")
@@ -249,9 +258,10 @@ def main():
                        help='运行模式')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='standard',
-                       choices=['standard', 'light', 'deep', 'pro'],
-                       help='模型类型')
+    parser.add_argument('--model', type=str, default='real_deep',
+                       choices=['standard', 'light', 'deep', 'pro', 
+                                'real', 'real_light', 'real_deep', 'real_pro'],
+                       help='模型类型 (推荐使用real_deep或real_pro)')
     parser.add_argument('--model_path', type=str, default='./checkpoints/best_model.pth',
                        help='模型路径 (用于评估)')
     

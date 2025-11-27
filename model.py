@@ -107,11 +107,9 @@ class CVNN_Estimator(nn.Module):
         self.dropout2 = ComplexDropout(p=dropout_rate)
         
         # ==================== 输出层 ====================
-        # FC_out: 256 -> 2 (复数)
-        self.fc_out = ComplexLinear(256, 2)
-        
-        # 复数转实数 (取模)
-        self.to_real = ComplexToReal(mode='abs')
+        # 输出层: 使用实值线性层 (从复数特征提取实部和虚部拼接后映射到2维输出)
+        # 256复数 -> 512实数 (concat real+imag) -> 2
+        self.fc_out = nn.Linear(512, 2)
         
         # 初始化权重
         self._init_weights()
@@ -182,11 +180,9 @@ class CVNN_Estimator(nn.Module):
         x = self.act_fc2(x)
         x = self.dropout2(x)
         
-        # 输出层
-        x = self.fc_out(x)  # (batch, 2) complex
-        
-        # 转为实数 (取模) + Sigmoid约束到[0,1]
-        out = torch.sigmoid(self.to_real(x))  # (batch, 2) real, range [0,1]
+        # 输出层: 拼接实部和虚部，然后用实值线性层映射
+        x_concat = torch.cat([x.real, x.imag], dim=-1)  # (batch, 512)
+        out = torch.sigmoid(self.fc_out(x_concat))  # (batch, 2) real, range [0,1]
         
         return out
 
@@ -208,18 +204,21 @@ class CVNN_Estimator_Light(nn.Module):
         # 特征提取
         self.features = nn.Sequential()
         
-        # Block 1: Conv(1->16)
+        # Block 1: Conv(1->16) + BN + ModReLU
         self.conv1 = ComplexConv2d(1, 16, kernel_size=3, padding=1)
+        self.bn1 = ComplexBatchNorm2d(16) if use_batchnorm else nn.Identity()
         self.act1 = ModReLU(num_features=16)
         self.pool1 = ComplexAvgPool2d(kernel_size=2, stride=2)  # 100 -> 50
         
-        # Block 2: Conv(16->32)
+        # Block 2: Conv(16->32) + BN + ModReLU
         self.conv2 = ComplexConv2d(16, 32, kernel_size=3, padding=1)
+        self.bn2 = ComplexBatchNorm2d(32) if use_batchnorm else nn.Identity()
         self.act2 = ModReLU(num_features=32)
         self.pool2 = ComplexAvgPool2d(kernel_size=2, stride=2)  # 50 -> 25
         
-        # Block 3: Conv(32->64)
+        # Block 3: Conv(32->64) + BN + ModReLU
         self.conv3 = ComplexConv2d(32, 64, kernel_size=3, padding=1)
+        self.bn3 = ComplexBatchNorm2d(64) if use_batchnorm else nn.Identity()
         self.act3 = ModReLU(num_features=64)
         self.pool3 = ComplexAvgPool2d(kernel_size=5, stride=5)  # 25 -> 5
         
@@ -234,8 +233,9 @@ class CVNN_Estimator_Light(nn.Module):
         self.act_fc1 = ModReLU(num_features=256)
         self.dropout = ComplexDropout(p=dropout_rate)
         
-        self.fc_out = ComplexLinear(256, 2)
-        self.to_real = ComplexToReal(mode='abs')
+        # 输出层: 使用实值线性层 (从复数特征提取实部和虚部拼接后映射到2维输出)
+        # 256复数 -> 512实数 (concat real+imag) -> 2
+        self.fc_out = nn.Linear(512, 2)
     
     def forward(self, x: Tensor) -> Tensor:
         # DataParallel 兼容性: 转换2通道实数为复数
@@ -244,16 +244,19 @@ class CVNN_Estimator_Light(nn.Module):
         
         # Block 1
         x = self.conv1(x)
+        x = self.bn1(x)
         x = self.act1(x)
         x = self.pool1(x)
         
         # Block 2
         x = self.conv2(x)
+        x = self.bn2(x)
         x = self.act2(x)
         x = self.pool2(x)
         
         # Block 3
         x = self.conv3(x)
+        x = self.bn3(x)
         x = self.act3(x)
         x = self.pool3(x)
         
@@ -263,9 +266,9 @@ class CVNN_Estimator_Light(nn.Module):
         x = self.act_fc1(x)
         x = self.dropout(x)
         
-        # 输出 + Sigmoid约束到[0,1]
-        x = self.fc_out(x)
-        out = torch.sigmoid(self.to_real(x))
+        # 输出: 拼接实部和虚部，然后用实值线性层映射
+        x_concat = torch.cat([x.real, x.imag], dim=-1)  # (batch, 512)
+        out = torch.sigmoid(self.fc_out(x_concat))
         
         return out
 
@@ -326,8 +329,9 @@ class CVNN_Estimator_Deep(nn.Module):
         self.act_fc2 = ModReLU(num_features=128)
         self.dropout2 = ComplexDropout(p=dropout_rate)
         
-        self.fc_out = ComplexLinear(128, 2)
-        self.to_real = ComplexToReal(mode='abs')
+        # 输出层: 使用实值线性层
+        # 128复数 -> 256实数 (concat real+imag) -> 2
+        self.fc_out = nn.Linear(256, 2)
     
     def forward(self, x: Tensor) -> Tensor:
         # DataParallel 兼容性: 转换2通道实数为复数
@@ -354,9 +358,9 @@ class CVNN_Estimator_Deep(nn.Module):
         x = self.dropout1(self.act_fc1(self.bn_fc1(self.fc1(x))))
         x = self.dropout2(self.act_fc2(self.bn_fc2(self.fc2(x))))
         
-        # 输出 + Sigmoid约束到[0,1]
-        x = self.fc_out(x)
-        out = torch.sigmoid(self.to_real(x))
+        # 输出层: 拼接实部和虚部，然后用实值线性层映射
+        x_concat = torch.cat([x.real, x.imag], dim=-1)  # (batch, 256)
+        out = torch.sigmoid(self.fc_out(x_concat))
         
         return out
 
@@ -481,9 +485,9 @@ class CVNN_Estimator_Pro(nn.Module):
         self.act_fc2 = ModReLU(num_features=64)
         self.dropout2 = ComplexDropout(p=dropout_rate)
         
-        # 输出层
-        self.fc_out = ComplexLinear(64, 2)
-        self.to_real = ComplexToReal(mode='abs')
+        # 输出层: 使用实值线性层
+        # 64复数 -> 128实数 (concat real+imag) -> 2
+        self.fc_out = nn.Linear(128, 2)
         
         # 初始化权重
         self._init_weights()
@@ -541,9 +545,9 @@ class CVNN_Estimator_Pro(nn.Module):
         x = self.dropout1(self.act_fc1(self.bn_fc1(self.fc1(x))))
         x = self.dropout2(self.act_fc2(self.bn_fc2(self.fc2(x))))
         
-        # 输出 + Sigmoid约束到[0,1]
-        x = self.fc_out(x)
-        out = torch.sigmoid(self.to_real(x))
+        # 输出层: 拼接实部和虚部，然后用实值线性层映射
+        x_concat = torch.cat([x.real, x.imag], dim=-1)  # (batch, 128)
+        out = torch.sigmoid(self.fc_out(x_concat))
         
         return out
 
@@ -553,54 +557,330 @@ def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-if __name__ == "__main__":
-    # 测试代码
-    print("=" * 60)
-    print("CVNN 模型测试")
-    print("=" * 60)
+# ============================================================================
+# 实值CNN模型 (已验证有效)
+# ============================================================================
+
+class RealCNN_Estimator(nn.Module):
+    """
+    实值CNN估计器
     
-    # 创建测试输入
-    batch_size = 4
-    x = torch.randn(batch_size, 1, MN, MN) + 1j * torch.randn(batch_size, 1, MN, MN)
-    x = x.to(torch.complex64)
+    使用标准实值CNN处理2通道输入(实部+虚部)
+    经验证可以有效学习FDA-MIMO数据
+    """
     
-    print(f"\n输入张量形状: {x.shape}, 数据类型: {x.dtype}")
+    def __init__(self, dropout_rate: float = 0.2):
+        super().__init__()
+        
+        # 特征提取: 输入 (batch, 2, 100, 100)
+        self.features = nn.Sequential(
+            # Block 1: 2 -> 32
+            nn.Conv2d(2, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 100 -> 50
+            
+            # Block 2: 32 -> 64
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 50 -> 25
+            
+            # Block 3: 64 -> 128
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(5),  # 25 -> 5
+        )
+        
+        # 分类器
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 5 * 5, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout_rate),
+            nn.Linear(256, 2),
+            nn.Sigmoid()
+        )
     
-    # 测试标准模型
-    print("\n1. 标准模型 (CVNN_Estimator):")
-    model_std = CVNN_Estimator()
-    out_std = model_std(x)
-    print(f"   输入: {x.shape}")
-    print(f"   输出: {out_std.shape}, dtype={out_std.dtype}")
-    print(f"   参数量: {count_parameters(model_std):,}")
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+class RealCNN_Estimator_Deep(nn.Module):
+    """
+    深度实值CNN估计器
     
-    # 测试轻量模型
-    print("\n2. 轻量模型 (CVNN_Estimator_Light):")
-    model_light = CVNN_Estimator_Light()
-    out_light = model_light(x)
-    print(f"   输入: {x.shape}")
-    print(f"   输出: {out_light.shape}, dtype={out_light.dtype}")
-    print(f"   参数量: {count_parameters(model_light):,}")
+    更深的网络结构，更强的特征提取能力
+    """
     
-    # 测试深度模型
-    print("\n3. 深度模型 (CVNN_Estimator_Deep):")
-    model_deep = CVNN_Estimator_Deep()
-    out_deep = model_deep(x)
-    print(f"   输入: {x.shape}")
-    print(f"   输出: {out_deep.shape}, dtype={out_deep.dtype}")
-    print(f"   参数量: {count_parameters(model_deep):,}")
+    def __init__(self, dropout_rate: float = 0.3):
+        super().__init__()
+        
+        self.features = nn.Sequential(
+            # Block 1: 2 -> 32
+            nn.Conv2d(2, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 100 -> 50
+            
+            # Block 2: 32 -> 64
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 50 -> 25
+            
+            # Block 3: 64 -> 128
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((5, 5)),
+        )
+        
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 5 * 5, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout_rate),
+            nn.Linear(512, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout_rate * 0.5),
+            nn.Linear(128, 2),
+            nn.Sigmoid()
+        )
     
-    # 测试模型工厂函数
-    print("\n4. 模型工厂函数测试:")
-    for name in ['standard', 'light', 'deep']:
-        model = get_model(name)
-        print(f"   {name}: {count_parameters(model):,} parameters")
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+class RealCNN_Estimator_Pro(nn.Module):
+    """
+    专业级实值CNN估计器
     
-    # 验证输出范围
-    print("\n5. 输出验证:")
-    print(f"   输出示例: {out_std[0].detach().numpy()}")
-    print(f"   输出范围: [{out_std.min().item():.4f}, {out_std.max().item():.4f}]")
+    带残差连接的深度网络，适合高精度估计任务
+    """
     
-    print("\n" + "=" * 60)
-    print("模型测试完成!")
-    print("=" * 60)
+    def __init__(self, dropout_rate: float = 0.2):
+        super().__init__()
+        
+        # 初始卷积
+        self.conv_in = nn.Sequential(
+            nn.Conv2d(2, 64, kernel_size=7, padding=3),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
+        
+        # 残差块组 1: 64 channels, 100x100
+        self.res1 = self._make_res_block(64)
+        self.res2 = self._make_res_block(64)
+        self.down1 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+        )  # 100 -> 50
+        
+        # 残差块组 2: 128 channels, 50x50
+        self.res3 = self._make_res_block(128)
+        self.res4 = self._make_res_block(128)
+        self.down2 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+        )  # 50 -> 25
+        
+        # 残差块组 3: 256 channels, 25x25
+        self.res5 = self._make_res_block(256)
+        self.res6 = self._make_res_block(256)
+        
+        # 全局池化
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        # 分类器
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout_rate),
+            nn.Linear(128, 2),
+            nn.Sigmoid()
+        )
+    
+    def _make_res_block(self, channels):
+        """创建残差块"""
+        return nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+        )
+    
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.conv_in(x)
+        
+        # 残差块组 1
+        identity = x
+        x = self.res1(x) + identity
+        x = nn.functional.relu(x, inplace=True)
+        identity = x
+        x = self.res2(x) + identity
+        x = nn.functional.relu(x, inplace=True)
+        x = self.down1(x)
+        
+        # 残差块组 2
+        identity = x
+        x = self.res3(x) + identity
+        x = nn.functional.relu(x, inplace=True)
+        identity = x
+        x = self.res4(x) + identity
+        x = nn.functional.relu(x, inplace=True)
+        x = self.down2(x)
+        
+        # 残差块组 3
+        identity = x
+        x = self.res5(x) + identity
+        x = nn.functional.relu(x, inplace=True)
+        identity = x
+        x = self.res6(x) + identity
+        x = nn.functional.relu(x, inplace=True)
+        
+        x = self.global_pool(x)
+        x = self.classifier(x)
+        return x
+
+
+# ============================================================================
+# 改进的CVNN模型 (已验证有效)
+# ============================================================================
+
+class ModReLU_Fixed(nn.Module):
+    """修复后的ModReLU - bias初始化为0"""
+    def __init__(self, num_features, bias_init=0.0):
+        super().__init__()
+        self.bias = nn.Parameter(torch.full((num_features,), bias_init))
+    
+    def forward(self, z):
+        mag = torch.abs(z)
+        phase = torch.angle(z)
+        bias = self.bias.view(1, -1, 1, 1) if z.dim() == 4 else self.bias.view(1, -1)
+        new_mag = torch.relu(mag + bias)
+        return new_mag * torch.exp(1j * phase)
+
+
+class CVNN_Improved(nn.Module):
+    """
+    改进的CVNN模型 (已验证有效)
+    
+    关键改进：
+    - ModReLU bias=0 (避免正偏置导致的恒等映射)
+    - 池化操作分离实部虚部
+    - 实值输出层
+    """
+    
+    def __init__(self, dropout_rate=0.2):
+        super().__init__()
+        
+        # Block 1: 1 -> 32
+        self.conv1a = ComplexConv2d(1, 32, kernel_size=3, padding=1)
+        self.bn1a = ComplexBatchNorm2d(32)
+        self.act1a = ModReLU_Fixed(32, bias_init=0.0)
+        self.conv1b = ComplexConv2d(32, 32, kernel_size=3, padding=1)
+        self.bn1b = ComplexBatchNorm2d(32)
+        self.act1b = ModReLU_Fixed(32, bias_init=0.0)
+        self.pool1 = nn.MaxPool2d(2)
+        
+        # Block 2: 32 -> 64
+        self.conv2a = ComplexConv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2a = ComplexBatchNorm2d(64)
+        self.act2a = ModReLU_Fixed(64, bias_init=0.0)
+        self.conv2b = ComplexConv2d(64, 64, kernel_size=3, padding=1)
+        self.bn2b = ComplexBatchNorm2d(64)
+        self.act2b = ModReLU_Fixed(64, bias_init=0.0)
+        self.pool2 = nn.MaxPool2d(2)
+        
+        # Block 3: 64 -> 128
+        self.conv3a = ComplexConv2d(64, 128, kernel_size=3, padding=1)
+        self.bn3a = ComplexBatchNorm2d(128)
+        self.act3a = ModReLU_Fixed(128, bias_init=0.0)
+        self.pool3 = nn.AdaptiveAvgPool2d(1)
+        
+        # 输出
+        self.flatten = ComplexFlatten()
+        self.fc1 = nn.Linear(128 * 2, 64)
+        self.fc2 = nn.Linear(64, 2)
+        self.dropout = nn.Dropout(dropout_rate)
+    
+    def forward(self, x):
+        if not x.is_complex():
+            if x.shape[1] == 2:
+                x = torch.complex(x[:, 0:1], x[:, 1:2])
+        
+        # Block 1
+        x = self.act1a(self.bn1a(self.conv1a(x)))
+        x = self.act1b(self.bn1b(self.conv1b(x)))
+        x = torch.complex(self.pool1(x.real), self.pool1(x.imag))
+        
+        # Block 2
+        x = self.act2a(self.bn2a(self.conv2a(x)))
+        x = self.act2b(self.bn2b(self.conv2b(x)))
+        x = torch.complex(self.pool2(x.real), self.pool2(x.imag))
+        
+        # Block 3
+        x = self.act3a(self.bn3a(self.conv3a(x)))
+        x = torch.complex(self.pool3(x.real), self.pool3(x.imag))
+        
+        # 输出
+        x = self.flatten(x)
+        x_real = torch.cat([x.real, x.imag], dim=1)
+        x_real = self.dropout(torch.relu(self.fc1(x_real)))
+        out = torch.sigmoid(self.fc2(x_real))
+        
+        return out
+
+
+def get_model(model_name: str = 'cvnn_improved', **kwargs) -> nn.Module:
+    """
+    获取模型实例
+    
+    Args:
+        model_name: 模型名称
+            - 'cvnn_improved': 改进的CVNN (推荐，默认)
+            - 'standard', 'light', 'deep', 'pro': 旧CVNN模型
+            - 'real', 'real_deep', 'real_pro': 实值CNN模型
+        **kwargs: 传递给模型的额外参数
+    
+    Returns:
+        model: 模型实例
+    """
+    models = {
+        # 改进的CVNN (推荐)
+        'cvnn_improved': CVNN_Improved,
+        # 旧CVNN模型
+        'standard': CVNN_Estimator,
+        'light': CVNN_Estimator_Light,
+        'deep': CVNN_Estimator_Deep,
+        'pro': CVNN_Estimator_Pro,
+        # 实值CNN模型
+        'real': RealCNN_Estimator,
+        'real_light': RealCNN_Estimator,
+        'real_deep': RealCNN_Estimator_Deep,
+        'real_pro': RealCNN_Estimator_Pro,
+    }
+    
+    if model_name not in models:
+        raise ValueError(f"Unknown model: {model_name}. Choose from {list(models.keys())}")
+    
+    return models[model_name](**kwargs)
