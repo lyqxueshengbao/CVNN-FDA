@@ -1,299 +1,211 @@
-# -*- coding: utf-8 -*-
 """
-FDA-MIMO 雷达参数估计 - 主程序入口
-Main Program for FDA-MIMO Radar Range-Angle Estimation using CVNN
-
-完整流程:
-1. 数据集创建
-2. 模型构建
-3. 模型训练
-4. 模型评估
-5. 结果可视化
-
-使用方法:
-    训练模型: python main.py --mode train
-    评估模型: python main.py --mode evaluate --model_path ./checkpoints/best_model.pth
-    完整流程: python main.py --mode all
+FDA-CVNN 一键运行入口
 """
-
 import argparse
-import os
-import sys
 import torch
 import numpy as np
 
-from config import (
-    DEVICE, NUM_EPOCHS, BATCH_SIZE, LEARNING_RATE,
-    TRAIN_SIZE, VAL_SIZE, TEST_SIZE,
-    SNR_TRAIN_MIN, SNR_TRAIN_MAX, SNR_TEST_RANGE,
-    MODEL_SAVE_PATH, RESULTS_PATH
-)
-from dataset import create_dataloaders
-from model import get_model, count_parameters
-from train import Trainer
-from evaluate import (
-    evaluate_model_vs_snr,
-    evaluate_model,
-    plot_rmse_vs_snr,
-    plot_scatter_comparison,
-    plot_error_distribution,
-    plot_training_history,
-    save_results_to_file,
-    create_test_loader_with_snr
-)
+import config as cfg
 
 
-def train_model(args):
-    """训练模型"""
-    print("\n" + "=" * 70)
-    print(" " * 20 + "开始训练 CVNN 模型")
-    print("=" * 70)
+def test_config():
+    """测试配置"""
+    print("\n" + "=" * 60)
+    print("1. 测试配置")
+    print("=" * 60)
     
-    # 创建数据加载器
-    print("\n[1/5] 创建数据集...")
+    from config import delta_f, c, r_max, R_max, M, N
+    
+    print(f"载频 f0 = {cfg.f0/1e9:.1f} GHz")
+    print(f"频率增量 delta_f = {delta_f/1e3:.0f} kHz")
+    print(f"阵元数 M×N = {M}×{N}")
+    print(f"距离范围 [0, {r_max}] m")
+    print(f"最大不模糊距离 R_max = {R_max:.0f} m")
+    
+    if R_max >= r_max:
+        print("✓ 物理参数正确，无模糊")
+    else:
+        print("✗ 警告：存在物理模糊！")
+    
+    return True
+
+
+def test_signal():
+    """测试信号生成"""
+    print("\n" + "=" * 60)
+    print("2. 测试信号生成")
+    print("=" * 60)
+    
+    from utils_physics import generate_covariance_matrix, get_steering_vector
+    
+    # 测试导向矢量
+    u = get_steering_vector(1000, 30)
+    print(f"导向矢量形状: {u.shape}")
+    
+    # 测试协方差矩阵
+    R = generate_covariance_matrix(1000, 30, snr_db=20)
+    print(f"协方差矩阵形状: {R.shape}")
+    print(f"实部范围: [{R[0].min():.4f}, {R[0].max():.4f}]")
+    
+    # 测试不同距离的信号区分度
+    print("\n信号区分度测试:")
+    r1, r2 = 1000, 1010  # 10米差距
+    R1 = generate_covariance_matrix(r1, 30, snr_db=50)  # 高SNR
+    R2 = generate_covariance_matrix(r2, 30, snr_db=50)
+    
+    # 计算相关性
+    R1_flat = R1.flatten()
+    R2_flat = R2.flatten()
+    corr = np.corrcoef(R1_flat, R2_flat)[0, 1]
+    print(f"  r={r1}m vs r={r2}m (差10m): 相关系数={corr:.4f}")
+    
+    return True
+
+
+def test_layers():
+    """测试复数层"""
+    print("\n" + "=" * 60)
+    print("3. 测试复数网络层")
+    print("=" * 60)
+    
+    from layers_complex import ComplexConv2d, ModReLU, ComplexAvgPool2d
+    
+    x = torch.randn(2, 2, 8, 50, 50)  # [B, 2, C, H, W]
+    
+    # 测试卷积
+    conv = ComplexConv2d(8, 16, kernel_size=3, padding=1)
+    out = conv(x)
+    print(f"ComplexConv2d: {x.shape} -> {out.shape}")
+    
+    # 测试激活
+    act = ModReLU(16, bias_init=-0.5)
+    out = act(out)
+    print(f"ModReLU (bias={act.bias[0].item():.2f}): 输出形状 {out.shape}")
+    
+    # 测试池化
+    pool = ComplexAvgPool2d(2)
+    out = pool(out)
+    print(f"ComplexAvgPool2d: -> {out.shape}")
+    
+    return True
+
+
+def test_model():
+    """测试模型"""
+    print("\n" + "=" * 60)
+    print("4. 测试模型")
+    print("=" * 60)
+    
+    from model import FDA_CVNN
+    
+    model = FDA_CVNN()
+    print(f"模型参数量: {model.count_parameters():,}")
+    
+    # 测试前向传播
+    x = torch.randn(4, 2, 100, 100)
+    with torch.no_grad():
+        y = model(x)
+    
+    print(f"输入: {x.shape}")
+    print(f"输出: {y.shape}")
+    print(f"输出范围: [{y.min().item():.4f}, {y.max().item():.4f}]")
+    
+    return True
+
+
+def test_dataset():
+    """测试数据集"""
+    print("\n" + "=" * 60)
+    print("5. 测试数据集")
+    print("=" * 60)
+    
+    from dataset import FDADataset, create_dataloaders
+    
+    # 测试数据集
+    dataset = FDADataset(100, snr_db=20, online=False, seed=42)
+    x, y = dataset[0]
+    print(f"样本形状: x={x.shape}, y={y.shape}")
+    
+    # 测试DataLoader
     train_loader, val_loader, test_loader = create_dataloaders(
-        train_size=args.train_size,
-        val_size=args.val_size,
-        test_size=args.test_size,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        snr_range=(SNR_TRAIN_MIN, SNR_TRAIN_MAX)
-    )
-    print(f"  ✓ 训练集: {args.train_size} 样本")
-    print(f"  ✓ 验证集: {args.val_size} 样本")
-    print(f"  ✓ 测试集: {args.test_size} 样本")
-    
-    # 创建模型
-    print("\n[2/5] 创建模型...")
-    model = get_model(
-        model_name=args.model,
-        dropout_rate=args.dropout
-    )
-    print(f"  ✓ 模型类型: {args.model}")
-    print(f"  ✓ 参数数量: {count_parameters(model):,}")
-    print(f"  ✓ 设备: {DEVICE}")
-    
-    # 创建训练器
-    print("\n[3/5] 初始化训练器...")
-    trainer = Trainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        learning_rate=args.lr,
-        weight_decay=args.weight_decay,
-        lambda_angle=args.lambda_angle,
-        device=DEVICE,
-        save_path=MODEL_SAVE_PATH,
-        use_multi_gpu=args.multi_gpu
-    )
-    print("  ✓ 优化器: Adam")
-    print(f"  ✓ 学习率: {args.lr}")
-    print(f"  ✓ 权重衰减: {args.weight_decay}")
-    
-    # 训练
-    print("\n[4/5] 开始训练...")
-    history = trainer.train(
-        num_epochs=args.epochs,
-        early_stopping_patience=args.patience,
-        verbose=True
+        train_samples=100, val_samples=50, test_samples=50, batch_size=16
     )
     
-    # 绘制训练曲线
-    print("\n[5/5] 保存训练曲线...")
-    plot_training_history(
-        history,
-        save_path=os.path.join(RESULTS_PATH, 'training_history.png'),
-        show=False
-    )
+    for batch_x, batch_y in train_loader:
+        print(f"批次形状: x={batch_x.shape}, y={batch_y.shape}")
+        break
     
-    print("\n" + "=" * 70)
-    print(" " * 25 + "训练完成!")
-    print("=" * 70)
-    
-    return trainer
+    return True
 
 
-def evaluate_model_main(args):
-    """评估模型"""
-    print("\n" + "=" * 70)
-    print(" " * 20 + "评估 CVNN 模型")
-    print("=" * 70)
+def quick_train():
+    """快速训练测试"""
+    print("\n" + "=" * 60)
+    print("6. 快速训练测试 (5 epochs)")
+    print("=" * 60)
     
-    # 加载模型
-    print("\n[1/4] 加载模型...")
-    model = get_model(
-        model_name=args.model,
-        dropout_rate=0.0  # 评估时不使用 dropout
+    from train import train
+    
+    model, history = train(
+        model_type='light',  # 用轻量级模型
+        epochs=5,
+        train_samples=500,
+        batch_size=32
     )
     
-    if not os.path.exists(args.model_path):
-        print(f"错误: 模型文件不存在: {args.model_path}")
-        sys.exit(1)
+    print(f"\n最终 RMSE_r: {history['val_rmse_r'][-1]:.2f}m")
+    print(f"最终 RMSE_θ: {history['val_rmse_theta'][-1]:.2f}°")
     
-    checkpoint = torch.load(args.model_path, map_location=DEVICE)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(DEVICE)
-    print(f"  ✓ 模型已加载: {args.model_path}")
-    print(f"  ✓ 最佳 Epoch: {checkpoint.get('best_epoch', 'N/A')}")
-    print(f"  ✓ 最佳验证损失: {checkpoint.get('best_val_loss', 'N/A'):.6f}")
-    
-    # 评估不同 SNR 下的性能
-    print("\n[2/4] 评估不同 SNR 下的性能...")
-    results = evaluate_model_vs_snr(
-        model=model,
-        snr_range=list(SNR_TEST_RANGE),
-        test_size=args.test_size,
-        batch_size=args.batch_size,
-        device=DEVICE,
-        verbose=True
-    )
-    
-    # 绘制 RMSE vs SNR 曲线
-    print("\n[3/4] 绘制性能曲线...")
-    plot_rmse_vs_snr(
-        results,
-        save_path=os.path.join(RESULTS_PATH, 'rmse_vs_snr.png'),
-        show=False
-    )
-    
-    # 在固定 SNR 下评估详细性能
-    print(f"\n[4/4] 在 SNR = {args.eval_snr} dB 下评估详细性能...")
-    test_loader = create_test_loader_with_snr(
-        test_size=args.test_size,
-        snr=args.eval_snr,
-        batch_size=args.batch_size
-    )
-    predictions, targets, rmse_r, rmse_theta = evaluate_model(model, test_loader, DEVICE)
-    
-    print(f"  ✓ RMSE_r: {rmse_r:.2f} m")
-    print(f"  ✓ RMSE_θ: {rmse_theta:.2f}°")
-    
-    # 绘制散点图和误差分布
-    plot_scatter_comparison(
-        predictions, targets,
-        save_path=os.path.join(RESULTS_PATH, 'scatter_comparison.png'),
-        show=False
-    )
-    
-    plot_error_distribution(
-        predictions, targets,
-        save_path=os.path.join(RESULTS_PATH, 'error_distribution.png'),
-        show=False
-    )
-    
-    # 保存结果到文件
-    save_results_to_file(
-        results, predictions, targets,
-        filepath=os.path.join(RESULTS_PATH, 'evaluation_results.txt')
-    )
-    
-    print("\n" + "=" * 70)
-    print(" " * 25 + "评估完成!")
-    print("=" * 70)
-
-
-def test_modules():
-    """测试各模块"""
-    print("\n" + "=" * 70)
-    print(" " * 20 + "测试各模块功能")
-    print("=" * 70)
-    
-    print("\n[1/6] 测试 utils 模块...")
-    os.system(f'{sys.executable} utils.py')
-    
-    print("\n[2/6] 测试 complex_layers 模块...")
-    os.system(f'{sys.executable} complex_layers.py')
-    
-    print("\n[3/6] 测试 dataset 模块...")
-    os.system(f'{sys.executable} dataset.py')
-    
-    print("\n[4/6] 测试 model 模块...")
-    os.system(f'{sys.executable} model.py')
-    
-    print("\n[5/6] 测试 train 模块...")
-    os.system(f'{sys.executable} train.py')
-    
-    print("\n[6/6] 测试 evaluate 模块...")
-    os.system(f'{sys.executable} evaluate.py')
-    
-    print("\n" + "=" * 70)
-    print(" " * 25 + "所有模块测试完成!")
-    print("=" * 70)
+    return True
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='FDA-MIMO 雷达参数估计 - CVNN 实现',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    
-    # 运行模式
-    parser.add_argument('--mode', type=str, default='all',
-                       choices=['train', 'evaluate', 'all', 'test'],
-                       help='运行模式')
-    
-    # 模型参数
-    parser.add_argument('--model', type=str, default='cvnn',
-                       choices=['cvnn', 'cvnn_improved', 'real', 'real_cnn'],
-                       help='模型类型 (推荐使用cvnn)')
-    parser.add_argument('--model_path', type=str, default='./checkpoints/best_model.pth',
-                       help='模型路径 (用于评估)')
-    
-    # 训练参数
-    parser.add_argument('--epochs', type=int, default=NUM_EPOCHS,
-                       help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=BATCH_SIZE,
-                       help='批大小')
-    parser.add_argument('--lr', type=float, default=LEARNING_RATE,
-                       help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=1e-5,
-                       help='权重衰减')
-    parser.add_argument('--dropout', type=float, default=0.3,
-                       help='Dropout 概率')
-    parser.add_argument('--lambda_angle', type=float, default=1.0,
-                       help='角度损失权重')
-    parser.add_argument('--patience', type=int, default=15,
-                       help='早停耐心值')
-    parser.add_argument('--multi_gpu', action='store_true', default=True,
-                       help='使用多GPU训练 (DataParallel)')
-    parser.add_argument('--num_workers', type=int, default=4,
-                       help='数据加载线程数')
-    
-    # 数据集参数
-    parser.add_argument('--train_size', type=int, default=TRAIN_SIZE,
-                       help='训练集大小')
-    parser.add_argument('--val_size', type=int, default=VAL_SIZE,
-                       help='验证集大小')
-    parser.add_argument('--test_size', type=int, default=TEST_SIZE,
-                       help='测试集大小')
-    
-    # 评估参数
-    parser.add_argument('--eval_snr', type=float, default=10.0,
-                       help='评估用的固定 SNR [dB]')
+    parser = argparse.ArgumentParser(description='FDA-CVNN 项目入口')
+    parser.add_argument('--test', action='store_true', help='运行所有测试')
+    parser.add_argument('--train', action='store_true', help='开始训练')
+    parser.add_argument('--quick', action='store_true', help='快速训练测试')
+    parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
+    parser.add_argument('--samples', type=int, default=10000, help='训练样本数')
     
     args = parser.parse_args()
     
-    # 设置随机种子
-    torch.manual_seed(42)
-    np.random.seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(42)
+    print("=" * 60)
+    print("FDA-MIMO CVNN 项目")
+    print("=" * 60)
+    print(f"设备: {cfg.device}")
+    print(f"PyTorch 版本: {torch.__version__}")
     
-    # 执行对应模式
-    if args.mode == 'train':
-        trainer = train_model(args)
+    if args.test:
+        # 运行所有测试
+        test_config()
+        test_signal()
+        test_layers()
+        test_model()
+        test_dataset()
+        print("\n" + "=" * 60)
+        print("所有测试通过！")
+        print("=" * 60)
         
-    elif args.mode == 'evaluate':
-        evaluate_model_main(args)
+    elif args.quick:
+        # 快速训练测试
+        test_config()
+        quick_train()
         
-    elif args.mode == 'all':
-        # 完整流程: 训练 + 评估
-        trainer = train_model(args)
-        args.model_path = os.path.join(MODEL_SAVE_PATH, 'best_model.pth')
-        evaluate_model_main(args)
-        
-    elif args.mode == 'test':
-        test_modules()
+    elif args.train:
+        # 正式训练
+        from train import train
+        train(
+            model_type='standard',
+            epochs=args.epochs,
+            train_samples=args.samples
+        )
+    else:
+        # 默认运行测试
+        print("\n使用方法:")
+        print("  python main.py --test    # 运行所有测试")
+        print("  python main.py --quick   # 快速训练测试")
+        print("  python main.py --train   # 正式训练")
+        print("  python main.py --train --epochs 200 --samples 20000")
 
 
 if __name__ == "__main__":

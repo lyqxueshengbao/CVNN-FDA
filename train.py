@@ -1,505 +1,287 @@
-# -*- coding: utf-8 -*-
 """
-FDA-MIMO 雷达参数估计 - 训练模块
-Training Module for FDA-MIMO Radar Range-Angle Estimation using CVNN
-
-包含:
-1. Trainer 类: 训练器
-2. 训练辅助函数
-3. 学习率调度器
+FDA-CVNN 训练脚本
 """
-
 import os
 import time
-import numpy as np
+import json
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, StepLR
-from typing import Dict, List, Tuple, Optional, Callable
+import numpy as np
 from tqdm import tqdm
 
-from config import (
-    DEVICE, NUM_EPOCHS, LEARNING_RATE, WEIGHT_DECAY,
-    MODEL_SAVE_PATH, RESULTS_PATH,
-    r_min, r_max, theta_min, theta_max
-)
-from utils import denormalize_labels
+import config as cfg
+from model import FDA_CVNN, FDA_CVNN_Light
+from dataset import create_dataloaders
+from utils_physics import denormalize_labels
 
 
-class RangeAngleLoss(nn.Module):
+def compute_metrics(preds, labels):
     """
-    距离-角度联合损失函数
+    计算评估指标
     
-    Loss = MSE(r_pred, r_gt) + λ * MSE(θ_pred, θ_gt)
+    参数:
+        preds: 预测值 [B, 2] (归一化)
+        labels: 真实值 [B, 2] (归一化)
     
-    由于距离和角度的数值范围不同,使用归一化后的标签计算损失
+    返回:
+        dict: 包含各项指标
     """
+    # 反归一化
+    preds_np = preds.cpu().numpy()
+    labels_np = labels.cpu().numpy()
     
-    def __init__(self, lambda_angle: float = 1.0):
-        """
-        Args:
-            lambda_angle: 角度损失权重 (默认1.0,即等权重)
-        """
-        super(RangeAngleLoss, self).__init__()
-        self.lambda_angle = lambda_angle
-        self.mse = nn.MSELoss()
+    preds_physical = denormalize_labels(preds_np)
+    labels_physical = denormalize_labels(labels_np)
     
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        计算损失
-        
-        Args:
-            pred: 预测值, shape (batch, 2), [r_norm, θ_norm]
-            target: 目标值, shape (batch, 2), [r_norm, θ_norm]
-        
-        Returns:
-            loss: 总损失
-        """
-        # 分离距离和角度
-        r_pred, theta_pred = pred[:, 0], pred[:, 1]
-        r_target, theta_target = target[:, 0], target[:, 1]
-        
-        # 计算各自的MSE损失
-        loss_r = self.mse(r_pred, r_target)
-        loss_theta = self.mse(theta_pred, theta_target)
-        
-        # 加权总损失
-        total_loss = loss_r + self.lambda_angle * loss_theta
-        
-        return total_loss
+    # 距离误差
+    r_pred = preds_physical[:, 0]
+    r_true = labels_physical[:, 0]
+    r_error = r_pred - r_true
+    rmse_r = np.sqrt(np.mean(r_error ** 2))
+    mae_r = np.mean(np.abs(r_error))
+    
+    # 角度误差
+    theta_pred = preds_physical[:, 1]
+    theta_true = labels_physical[:, 1]
+    theta_error = theta_pred - theta_true
+    rmse_theta = np.sqrt(np.mean(theta_error ** 2))
+    mae_theta = np.mean(np.abs(theta_error))
+    
+    return {
+        'rmse_r': rmse_r,
+        'mae_r': mae_r,
+        'rmse_theta': rmse_theta,
+        'mae_theta': mae_theta
+    }
 
 
-class EarlyStopping:
-    """
-    早停机制
+def train_epoch(model, train_loader, optimizer, criterion, device):
+    """训练一个epoch"""
+    model.train()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
     
-    当验证损失不再改善时停止训练
-    """
-    
-    def __init__(self, patience: int = 10, min_delta: float = 1e-4, verbose: bool = True):
-        """
-        Args:
-            patience: 容忍的epoch数
-            min_delta: 最小改善量
-            verbose: 是否打印信息
-        """
-        self.patience = patience
-        self.min_delta = min_delta
-        self.verbose = verbose
-        self.counter = 0
-        self.best_loss = None
-        self.early_stop = False
-    
-    def __call__(self, val_loss: float) -> bool:
-        if self.best_loss is None:
-            self.best_loss = val_loss
-        elif val_loss > self.best_loss - self.min_delta:
-            self.counter += 1
-            if self.verbose:
-                print(f"  EarlyStopping counter: {self.counter}/{self.patience}")
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_loss = val_loss
-            self.counter = 0
+    pbar = tqdm(train_loader, desc='Training', leave=False)
+    for batch_x, batch_y in pbar:
+        batch_x = batch_x.to(device)
+        batch_y = batch_y.to(device)
         
-        return self.early_stop
+        # 前向传播
+        preds = model(batch_x)
+        loss = criterion(preds, batch_y)
+        
+        # 反向传播
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        all_preds.append(preds.detach())
+        all_labels.append(batch_y.detach())
+        
+        pbar.set_postfix({'loss': f'{loss.item():.6f}'})
+    
+    # 计算指标
+    all_preds = torch.cat(all_preds, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
+    metrics = compute_metrics(all_preds, all_labels)
+    metrics['loss'] = total_loss / len(train_loader)
+    
+    return metrics
 
 
-class Trainer:
-    """
-    CVNN 训练器
+def validate(model, val_loader, criterion, device):
+    """验证"""
+    model.eval()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
     
-    负责模型训练、验证、保存和加载
-    """
+    with torch.no_grad():
+        for batch_x, batch_y in val_loader:
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
+            
+            preds = model(batch_x)
+            loss = criterion(preds, batch_y)
+            
+            total_loss += loss.item()
+            all_preds.append(preds)
+            all_labels.append(batch_y)
     
-    def __init__(self,
-                 model: nn.Module,
-                 train_loader: DataLoader,
-                 val_loader: DataLoader,
-                 learning_rate: float = LEARNING_RATE,
-                 weight_decay: float = WEIGHT_DECAY,
-                 lambda_angle: float = 1.0,
-                 device: torch.device = DEVICE,
-                 save_path: str = MODEL_SAVE_PATH,
-                 use_multi_gpu: bool = True):
-        """
-        初始化训练器
-        
-        Args:
-            model: CVNN 模型
-            train_loader: 训练数据加载器
-            val_loader: 验证数据加载器
-            learning_rate: 学习率
-            weight_decay: 权重衰减
-            lambda_angle: 角度损失权重
-            device: 训练设备
-            save_path: 模型保存路径
-            use_multi_gpu: 是否使用多GPU (DataParallel)
-        """
-        self.device = device
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.save_path = save_path
-        
-        # 多GPU支持
-        self.use_multi_gpu = use_multi_gpu and torch.cuda.device_count() > 1
-        if self.use_multi_gpu:
-            print(f"使用 {torch.cuda.device_count()} 个GPU进行训练")
-            model = model.to(device)
-            self.model = nn.DataParallel(model)
-            self.model_without_ddp = model  # 保存原始模型用于保存权重
-        else:
-            self.model = model.to(device)
-            self.model_without_ddp = self.model
-        
-        # 创建保存目录
-        os.makedirs(save_path, exist_ok=True)
-        os.makedirs(RESULTS_PATH, exist_ok=True)
-        
-        # 损失函数
-        self.criterion = RangeAngleLoss(lambda_angle=lambda_angle)
-        
-        # 优化器 (Adam 支持复数参数的梯度)
-        self.optimizer = optim.Adam(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay
-        )
-        
-        # 学习率调度器
-        self.scheduler = ReduceLROnPlateau(
-            self.optimizer,
-            mode='min',
-            factor=0.5,
-            patience=5,
-            verbose=True
-        )
-        
-        # 训练历史
-        self.history = {
-            'train_loss': [],
-            'val_loss': [],
-            'train_rmse_r': [],
-            'train_rmse_theta': [],
-            'val_rmse_r': [],
-            'val_rmse_theta': [],
-            'lr': []
-        }
-        
-        # 最佳模型
-        self.best_val_loss = float('inf')
-        self.best_epoch = 0
+    all_preds = torch.cat(all_preds, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
+    metrics = compute_metrics(all_preds, all_labels)
+    metrics['loss'] = total_loss / len(val_loader)
     
-    def train_epoch(self) -> Tuple[float, float, float]:
-        """
-        训练一个epoch
-        
-        Returns:
-            avg_loss: 平均损失
-            rmse_r: 距离RMSE (真实单位)
-            rmse_theta: 角度RMSE (真实单位)
-        """
-        self.model.train()
-        total_loss = 0.0
-        all_preds = []
-        all_targets = []
-        
-        pbar = tqdm(self.train_loader, desc="Training", leave=False)
-        
-        for batch_R, batch_label, batch_raw in pbar:
-            # 移动数据到设备
-            batch_R = batch_R.to(self.device)
-            batch_label = batch_label.to(self.device)
-            
-            # 前向传播
-            self.optimizer.zero_grad()
-            outputs = self.model(batch_R)
-            
-            # 计算损失
-            loss = self.criterion(outputs, batch_label)
-            
-            # 反向传播
-            loss.backward()
-            
-            # 梯度裁剪 (防止梯度爆炸)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
-            self.optimizer.step()
-            
-            # 记录
-            total_loss += loss.item() * batch_R.size(0)
-            all_preds.append(outputs.detach().cpu())
-            all_targets.append(batch_raw)  # 使用原始标签计算RMSE
-            
-            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-        
-        # 计算平均损失
-        avg_loss = total_loss / len(self.train_loader.dataset)
-        
-        # 计算RMSE (真实单位)
-        all_preds = torch.cat(all_preds, dim=0).numpy()
-        all_targets = torch.cat(all_targets, dim=0).numpy()
-        
-        # 反归一化预测值
-        pred_r = all_preds[:, 0] * (r_max - r_min) + r_min
-        pred_theta = all_preds[:, 1] * (theta_max - theta_min) + theta_min
-        
-        # 真实值
-        true_r = all_targets[:, 0]
-        true_theta = all_targets[:, 1]
-        
-        # 计算RMSE
-        rmse_r = np.sqrt(np.mean((pred_r - true_r) ** 2))
-        rmse_theta = np.sqrt(np.mean((pred_theta - true_theta) ** 2))
-        
-        return avg_loss, rmse_r, rmse_theta
-    
-    @torch.no_grad()
-    def validate(self) -> Tuple[float, float, float]:
-        """
-        验证模型
-        
-        Returns:
-            avg_loss: 平均损失
-            rmse_r: 距离RMSE (真实单位)
-            rmse_theta: 角度RMSE (真实单位)
-        """
-        self.model.eval()
-        total_loss = 0.0
-        all_preds = []
-        all_targets = []
-        
-        for batch_R, batch_label, batch_raw in self.val_loader:
-            batch_R = batch_R.to(self.device)
-            batch_label = batch_label.to(self.device)
-            
-            outputs = self.model(batch_R)
-            loss = self.criterion(outputs, batch_label)
-            
-            total_loss += loss.item() * batch_R.size(0)
-            all_preds.append(outputs.cpu())
-            all_targets.append(batch_raw)
-        
-        avg_loss = total_loss / len(self.val_loader.dataset)
-        
-        all_preds = torch.cat(all_preds, dim=0).numpy()
-        all_targets = torch.cat(all_targets, dim=0).numpy()
-        
-        pred_r = all_preds[:, 0] * (r_max - r_min) + r_min
-        pred_theta = all_preds[:, 1] * (theta_max - theta_min) + theta_min
-        
-        true_r = all_targets[:, 0]
-        true_theta = all_targets[:, 1]
-        
-        rmse_r = np.sqrt(np.mean((pred_r - true_r) ** 2))
-        rmse_theta = np.sqrt(np.mean((pred_theta - true_theta) ** 2))
-        
-        return avg_loss, rmse_r, rmse_theta
-    
-    def train(self,
-              num_epochs: int = NUM_EPOCHS,
-              early_stopping_patience: int = 15,
-              verbose: bool = True) -> Dict:
-        """
-        完整训练流程
-        
-        Args:
-            num_epochs: 训练轮数
-            early_stopping_patience: 早停耐心值
-            verbose: 是否打印详细信息
-        
-        Returns:
-            history: 训练历史记录
-        """
-        print("=" * 60)
-        print("开始训练 CVNN 模型")
-        print(f"设备: {self.device}")
-        print(f"训练集大小: {len(self.train_loader.dataset)}")
-        print(f"验证集大小: {len(self.val_loader.dataset)}")
-        print("=" * 60)
-        
-        early_stopping = EarlyStopping(patience=early_stopping_patience, verbose=verbose)
-        
-        start_time = time.time()
-        
-        for epoch in range(num_epochs):
-            epoch_start = time.time()
-            
-            # 训练
-            train_loss, train_rmse_r, train_rmse_theta = self.train_epoch()
-            
-            # 验证
-            val_loss, val_rmse_r, val_rmse_theta = self.validate()
-            
-            # 更新学习率
-            self.scheduler.step(val_loss)
-            current_lr = self.optimizer.param_groups[0]['lr']
-            
-            # 记录历史
-            self.history['train_loss'].append(train_loss)
-            self.history['val_loss'].append(val_loss)
-            self.history['train_rmse_r'].append(train_rmse_r)
-            self.history['train_rmse_theta'].append(train_rmse_theta)
-            self.history['val_rmse_r'].append(val_rmse_r)
-            self.history['val_rmse_theta'].append(val_rmse_theta)
-            self.history['lr'].append(current_lr)
-            
-            epoch_time = time.time() - epoch_start
-            
-            # 打印信息
-            if verbose:
-                print(f"\nEpoch [{epoch+1}/{num_epochs}] ({epoch_time:.1f}s)")
-                print(f"  Train Loss: {train_loss:.6f} | RMSE_r: {train_rmse_r:.2f}m | RMSE_θ: {train_rmse_theta:.2f}°")
-                print(f"  Val Loss:   {val_loss:.6f} | RMSE_r: {val_rmse_r:.2f}m | RMSE_θ: {val_rmse_theta:.2f}°")
-                print(f"  LR: {current_lr:.2e}")
-            
-            # 保存最佳模型
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.best_epoch = epoch + 1
-                self.save_model('best_model.pth')
-                if verbose:
-                    print(f"  ✓ 保存最佳模型 (epoch {self.best_epoch})")
-            
-            # 定期保存
-            if (epoch + 1) % 10 == 0:
-                self.save_model(f'model_epoch_{epoch+1}.pth')
-            
-            # 早停检查
-            if early_stopping(val_loss):
-                print(f"\n早停触发! 训练在 epoch {epoch+1} 停止")
-                break
-        
-        total_time = time.time() - start_time
-        print("\n" + "=" * 60)
-        print(f"训练完成! 总用时: {total_time/60:.1f} 分钟")
-        print(f"最佳模型: Epoch {self.best_epoch}, Val Loss: {self.best_val_loss:.6f}")
-        print("=" * 60)
-        
-        # 保存最终模型
-        self.save_model('final_model.pth')
-        
-        # 保存训练历史
-        self.save_history()
-        
-        return self.history
-    
-    def save_model(self, filename: str):
-        """保存模型"""
-        filepath = os.path.join(self.save_path, filename)
-        # 如果使用DataParallel，保存原始模型的state_dict
-        model_to_save = self.model_without_ddp if self.use_multi_gpu else self.model
-        torch.save({
-            'model_state_dict': model_to_save.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'best_val_loss': self.best_val_loss,
-            'best_epoch': self.best_epoch,
-            'history': self.history
-        }, filepath)
-    
-    def load_model(self, filename: str):
-        """加载模型"""
-        filepath = os.path.join(self.save_path, filename)
-        checkpoint = torch.load(filepath, map_location=self.device)
-        # 加载到原始模型
-        model_to_load = self.model_without_ddp if self.use_multi_gpu else self.model
-        model_to_load.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        self.best_val_loss = checkpoint['best_val_loss']
-        self.best_epoch = checkpoint['best_epoch']
-        self.history = checkpoint['history']
-        print(f"加载模型: {filename}")
-    
-    def save_history(self):
-        """保存训练历史"""
-        import json
-        filepath = os.path.join(RESULTS_PATH, 'training_history.json')
-        
-        # 转换 numpy 类型为 Python 原生类型
-        history_serializable = {}
-        for key, value in self.history.items():
-            if isinstance(value, list):
-                history_serializable[key] = [float(v) if hasattr(v, 'item') else v for v in value]
-            else:
-                history_serializable[key] = value
-        
-        with open(filepath, 'w') as f:
-            json.dump(history_serializable, f, indent=2)
-        print(f"训练历史已保存到: {filepath}")
+    return metrics
 
 
-def compute_rmse(predictions: np.ndarray, 
-                 targets: np.ndarray,
-                 denormalize: bool = True) -> Tuple[float, float]:
+def train(model_type='standard', epochs=None, lr=None, batch_size=None,
+          train_samples=None, snr_train_range=None, save_best=True):
     """
-    计算 RMSE
+    主训练函数
     
-    论文公式 (5-15), (5-16):
-    RMSE_r = sqrt(1/N * Σ(r_pred - r_true)^2)
-    RMSE_θ = sqrt(1/N * Σ(θ_pred - θ_true)^2)
-    
-    Args:
-        predictions: 预测值, shape (N, 2)
-        targets: 真实值, shape (N, 2)
-        denormalize: 是否反归一化
-    
-    Returns:
-        rmse_r: 距离 RMSE [m]
-        rmse_theta: 角度 RMSE [degrees]
+    参数:
+        model_type: 模型类型 ('standard' 或 'light')
+        epochs: 训练轮数
+        lr: 学习率
+        batch_size: 批次大小
+        train_samples: 训练样本数
+        snr_train_range: 训练SNR范围
+        save_best: 是否保存最佳模型
     """
-    if denormalize:
-        pred_r = predictions[:, 0] * (r_max - r_min) + r_min
-        pred_theta = predictions[:, 1] * (theta_max - theta_min) + theta_min
+    # 参数设置
+    epochs = epochs or cfg.epochs
+    lr = lr or cfg.lr
+    batch_size = batch_size or cfg.batch_size
+    train_samples = train_samples or cfg.train_samples
+    snr_train_range = snr_train_range or (cfg.snr_train_min, cfg.snr_train_max)
+    device = cfg.device
+    
+    print("=" * 60)
+    print("FDA-CVNN 训练")
+    print("=" * 60)
+    print(f"设备: {device}")
+    print(f"模型: {model_type}")
+    print(f"训练样本: {train_samples}")
+    print(f"批次大小: {batch_size}")
+    print(f"学习率: {lr}")
+    print(f"训练轮数: {epochs}")
+    print(f"SNR范围: {snr_train_range} dB")
+    print("=" * 60)
+    
+    # 创建模型
+    if model_type == 'light':
+        model = FDA_CVNN_Light().to(device)
     else:
-        pred_r = predictions[:, 0]
-        pred_theta = predictions[:, 1]
+        model = FDA_CVNN().to(device)
     
-    true_r = targets[:, 0]
-    true_theta = targets[:, 1]
+    print(f"模型参数量: {model.count_parameters():,}")
     
-    rmse_r = np.sqrt(np.mean((pred_r - true_r) ** 2))
-    rmse_theta = np.sqrt(np.mean((pred_theta - true_theta) ** 2))
+    # 创建数据加载器
+    train_loader, val_loader, _ = create_dataloaders(
+        train_samples=train_samples,
+        batch_size=batch_size,
+        snr_train_range=snr_train_range,
+        online_train=True  # 在线生成训练数据
+    )
     
-    return rmse_r, rmse_theta
+    # 优化器和损失函数
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=10, verbose=True
+    )
+    criterion = nn.MSELoss()
+    
+    # 训练历史
+    history = {
+        'train_loss': [], 'val_loss': [],
+        'train_rmse_r': [], 'val_rmse_r': [],
+        'train_rmse_theta': [], 'val_rmse_theta': []
+    }
+    
+    best_val_rmse_r = float('inf')
+    best_epoch = 0
+    
+    # 创建检查点目录
+    os.makedirs(cfg.checkpoint_dir, exist_ok=True)
+    
+    # 训练循环
+    start_time = time.time()
+    
+    for epoch in range(1, epochs + 1):
+        print(f"\nEpoch {epoch}/{epochs}")
+        
+        # 训练
+        train_metrics = train_epoch(model, train_loader, optimizer, criterion, device)
+        
+        # 验证
+        val_metrics = validate(model, val_loader, criterion, device)
+        
+        # 学习率调整
+        scheduler.step(val_metrics['loss'])
+        
+        # 记录历史
+        history['train_loss'].append(train_metrics['loss'])
+        history['val_loss'].append(val_metrics['loss'])
+        history['train_rmse_r'].append(train_metrics['rmse_r'])
+        history['val_rmse_r'].append(val_metrics['rmse_r'])
+        history['train_rmse_theta'].append(train_metrics['rmse_theta'])
+        history['val_rmse_theta'].append(val_metrics['rmse_theta'])
+        
+        # 打印指标
+        print(f"  Train - Loss: {train_metrics['loss']:.6f}, "
+              f"RMSE_r: {train_metrics['rmse_r']:.2f}m, "
+              f"RMSE_θ: {train_metrics['rmse_theta']:.2f}°")
+        print(f"  Val   - Loss: {val_metrics['loss']:.6f}, "
+              f"RMSE_r: {val_metrics['rmse_r']:.2f}m, "
+              f"RMSE_θ: {val_metrics['rmse_theta']:.2f}°")
+        
+        # 保存最佳模型
+        if save_best and val_metrics['rmse_r'] < best_val_rmse_r:
+            best_val_rmse_r = val_metrics['rmse_r']
+            best_epoch = epoch
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_rmse_r': val_metrics['rmse_r'],
+                'val_rmse_theta': val_metrics['rmse_theta'],
+            }, cfg.model_save_path)
+            print(f"  ★ 保存最佳模型 (RMSE_r: {best_val_rmse_r:.2f}m)")
+    
+    # 训练完成
+    total_time = time.time() - start_time
+    print("\n" + "=" * 60)
+    print("训练完成！")
+    print(f"总用时: {total_time/60:.1f} 分钟")
+    print(f"最佳模型: Epoch {best_epoch}, RMSE_r = {best_val_rmse_r:.2f}m")
+    print("=" * 60)
+    
+    # 保存训练历史
+    history_path = os.path.join(cfg.checkpoint_dir, 'training_history.json')
+    # 转换为Python原生类型
+    history_serializable = {k: [float(v) for v in vals] for k, vals in history.items()}
+    with open(history_path, 'w') as f:
+        json.dump(history_serializable, f, indent=2)
+    print(f"训练历史已保存到: {history_path}")
+    
+    return model, history
 
 
 if __name__ == "__main__":
-    # 简单测试
-    print("=" * 60)
-    print("训练模块测试")
-    print("=" * 60)
+    import argparse
     
-    # 测试损失函数
-    print("\n1. 测试 RangeAngleLoss:")
-    criterion = RangeAngleLoss(lambda_angle=1.0)
-    pred = torch.rand(32, 2)
-    target = torch.rand(32, 2)
-    loss = criterion(pred, target)
-    print(f"   Loss: {loss.item():.4f}")
+    parser = argparse.ArgumentParser(description='FDA-CVNN Training')
+    parser.add_argument('--model', type=str, default='standard', 
+                        choices=['standard', 'light'],
+                        help='Model type')
+    parser.add_argument('--epochs', type=int, default=None,
+                        help='Number of epochs')
+    parser.add_argument('--lr', type=float, default=None,
+                        help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='Batch size')
+    parser.add_argument('--train_samples', type=int, default=None,
+                        help='Number of training samples')
+    parser.add_argument('--snr_min', type=float, default=None,
+                        help='Minimum training SNR')
+    parser.add_argument('--snr_max', type=float, default=None,
+                        help='Maximum training SNR')
     
-    # 测试早停
-    print("\n2. 测试 EarlyStopping:")
-    es = EarlyStopping(patience=3, verbose=False)
-    losses = [1.0, 0.9, 0.85, 0.85, 0.86, 0.87, 0.88]
-    for i, l in enumerate(losses):
-        stop = es(l)
-        print(f"   Epoch {i+1}: loss={l}, stop={stop}")
-        if stop:
-            break
+    args = parser.parse_args()
     
-    # 测试 RMSE 计算
-    print("\n3. 测试 RMSE 计算:")
-    pred = np.array([[0.5, 0.5], [0.6, 0.4]])
-    target = np.array([[1000, 0], [1200, -12]])  # 真实值
-    rmse_r, rmse_theta = compute_rmse(pred, target, denormalize=True)
-    print(f"   RMSE_r: {rmse_r:.2f} m")
-    print(f"   RMSE_θ: {rmse_theta:.2f}°")
+    snr_range = None
+    if args.snr_min is not None and args.snr_max is not None:
+        snr_range = (args.snr_min, args.snr_max)
     
-    print("\n" + "=" * 60)
-    print("训练模块测试完成!")
-    print("=" * 60)
+    train(
+        model_type=args.model,
+        epochs=args.epochs,
+        lr=args.lr,
+        batch_size=args.batch_size,
+        train_samples=args.train_samples,
+        snr_train_range=snr_range
+    )
