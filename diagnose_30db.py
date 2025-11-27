@@ -41,9 +41,9 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--model', type=str, default='pro', 
-                        choices=['cvnn', 'pro', 'real'],
-                        help='模型类型: cvnn(~300K), pro(~6.8M), real')
+    parser.add_argument('--model', type=str, default='medium', 
+                        choices=['cvnn', 'medium', 'pro', 'real'],
+                        help='模型类型: cvnn(~300K), medium(~1.5M), pro(~19M), real')
     parser.add_argument('--multi_gpu', action='store_true', help='使用多GPU')
     args = parser.parse_args()
 

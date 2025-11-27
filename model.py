@@ -173,6 +173,88 @@ class ComplexResidualBlock(nn.Module):
         return out
 
 
+class CVNN_Medium(nn.Module):
+    """
+    中等规模 CVNN - 平衡参数量和性能
+    
+    结构:
+    - 4个卷积块 + 2个残差块
+    - 通道数: 32 -> 64 -> 128 -> 256
+    - 全局平均池化 + 实值全连接输出
+    
+    参数量: ~1.5M (vs CVNN_Improved ~300K, CVNN_Pro ~19M)
+    """
+    
+    def __init__(self, dropout_rate: float = 0.2):
+        super().__init__()
+        
+        # Block 1: 1 -> 32 channels, 100x100
+        self.conv1 = ComplexConv2d(1, 32, kernel_size=3, padding=1)
+        self.bn1 = ComplexBatchNorm2d(32)
+        self.act1 = ModReLU(32, bias_init=0.0)
+        self.res1 = ComplexResidualBlock(32)
+        self.pool1 = nn.MaxPool2d(2)  # 100 -> 50
+        
+        # Block 2: 32 -> 64 channels, 50x50
+        self.conv2 = ComplexConv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = ComplexBatchNorm2d(64)
+        self.act2 = ModReLU(64, bias_init=0.0)
+        self.res2 = ComplexResidualBlock(64)
+        self.pool2 = nn.MaxPool2d(2)  # 50 -> 25
+        
+        # Block 3: 64 -> 128 channels, 25x25
+        self.conv3 = ComplexConv2d(64, 128, kernel_size=3, padding=1)
+        self.bn3 = ComplexBatchNorm2d(128)
+        self.act3 = ModReLU(128, bias_init=0.0)
+        self.res3 = ComplexResidualBlock(128)
+        self.pool3 = nn.MaxPool2d(5)  # 25 -> 5
+        
+        # Block 4: 128 -> 256 channels, 5x5
+        self.conv4 = ComplexConv2d(128, 256, kernel_size=3, padding=1)
+        self.bn4 = ComplexBatchNorm2d(256)
+        self.act4 = ModReLU(256, bias_init=0.0)
+        self.global_pool = nn.AdaptiveAvgPool2d(1)  # 5 -> 1
+        
+        # 输出层: 实值全连接 (避免ComplexLinear的4倍参数)
+        self.flatten = ComplexFlatten()
+        self.fc1 = nn.Linear(256 * 2, 128)  # 256 complex -> 512 real -> 128
+        self.fc2 = nn.Linear(128, 2)
+        self.dropout = nn.Dropout(dropout_rate)
+    
+    def forward(self, x: Tensor) -> Tensor:
+        # 输入转换: 2通道实数 -> 复数
+        if not x.is_complex():
+            if x.shape[1] == 2:
+                x = torch.complex(x[:, 0:1], x[:, 1:2])
+        
+        # Block 1
+        x = self.act1(self.bn1(self.conv1(x)))
+        x = self.res1(x)
+        x = torch.complex(self.pool1(x.real), self.pool1(x.imag))
+        
+        # Block 2
+        x = self.act2(self.bn2(self.conv2(x)))
+        x = self.res2(x)
+        x = torch.complex(self.pool2(x.real), self.pool2(x.imag))
+        
+        # Block 3
+        x = self.act3(self.bn3(self.conv3(x)))
+        x = self.res3(x)
+        x = torch.complex(self.pool3(x.real), self.pool3(x.imag))
+        
+        # Block 4
+        x = self.act4(self.bn4(self.conv4(x)))
+        x = torch.complex(self.global_pool(x.real), self.global_pool(x.imag))
+        
+        # 输出层
+        x = self.flatten(x)
+        x_real = torch.cat([x.real, x.imag], dim=1)
+        x_real = self.dropout(F.relu(self.fc1(x_real)))
+        out = torch.sigmoid(self.fc2(x_real))
+        
+        return out
+
+
 class CVNN_Pro(nn.Module):
     """
     增强版 CVNN 估计器 - 带残差连接的深度网络
@@ -360,7 +442,8 @@ def get_model(model_name: str = 'cvnn', **kwargs) -> nn.Module:
     Args:
         model_name: 模型名称
             - 'cvnn' / 'cvnn_improved': 改进的CVNN (~300K参数)
-            - 'pro' / 'cvnn_pro': 深度残差CVNN (~6.8M参数, 推荐)
+            - 'medium': 中等规模CVNN (~1.5M参数, 推荐)
+            - 'pro' / 'cvnn_pro': 深度残差CVNN (~19M参数, 大模型)
             - 'real' / 'real_cnn': 实值CNN (基线对比)
         **kwargs: 传递给模型的额外参数
     
@@ -370,6 +453,7 @@ def get_model(model_name: str = 'cvnn', **kwargs) -> nn.Module:
     models = {
         'cvnn': CVNN_Improved,
         'cvnn_improved': CVNN_Improved,
+        'medium': CVNN_Medium,
         'pro': CVNN_Pro,
         'cvnn_pro': CVNN_Pro,
         'real': RealCNN_Estimator,
