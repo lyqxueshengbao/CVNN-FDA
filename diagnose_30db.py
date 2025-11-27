@@ -44,6 +44,7 @@ def main():
     parser.add_argument('--model', type=str, default='pro', 
                         choices=['cvnn', 'pro', 'real'],
                         help='模型类型: cvnn(~300K), pro(~6.8M), real')
+    parser.add_argument('--multi_gpu', action='store_true', help='使用多GPU')
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -51,12 +52,19 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
+    # 检测GPU数量
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    use_multi_gpu = args.multi_gpu and num_gpus > 1
+    
     print('='*70)
     print('30dB 过拟合测试 - 验证模型结构上限')
     print('='*70)
     print(f'设备: {device}')
     if torch.cuda.is_available():
-        print(f'GPU: {torch.cuda.get_device_name(0)}')
+        for i in range(num_gpus):
+            print(f'  GPU {i}: {torch.cuda.get_device_name(i)}')
+        if use_multi_gpu:
+            print(f'使用 DataParallel ({num_gpus} GPUs)')
     print(f'模型: {args.model}')
     print(f'SNR: {args.snr}dB (高SNR，几乎无噪声)')
     print(f'训练集: {args.train_size}, 验证集: {args.val_size}')
@@ -84,6 +92,11 @@ def main():
 
     # 模型
     model = get_model(args.model).to(device)
+    
+    # 多GPU支持
+    if use_multi_gpu:
+        model = nn.DataParallel(model)
+    
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     criterion = nn.MSELoss()
