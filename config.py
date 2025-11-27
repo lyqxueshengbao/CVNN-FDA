@@ -15,7 +15,7 @@ MN = M * N                      # 虚拟阵元数 (Virtual array size)
 
 c = 3e8                         # 光速 (Speed of light) [m/s]
 f0 = 1e9                        # 载频 (Carrier frequency) [Hz]
-delta_f = 100e3                 # 频率偏移量 (Frequency increment) [Hz] - 100kHz, 周期1500m
+delta_f = 75e3                  # 频率偏移量 (Frequency increment) [Hz] - 75kHz, R_max=2000m 无模糊
 wavelength = c / f0             # 波长 (Wavelength) [m]
 d = c / (2 * f0)                # 阵元间距 (Element spacing) [m], 即 0.15m
 

@@ -81,25 +81,25 @@ class CVNN_Improved(nn.Module):
         # Block 1: 1 -> 32 channels
         self.conv1a = ComplexConv2d(1, 32, kernel_size=3, padding=1)
         self.bn1a = ComplexBatchNorm2d(32)
-        self.act1a = ModReLU(32, bias_init=0.0)
+        self.act1a = ModReLU(32, bias_init=-0.5)  # 负偏置引入非线性
         self.conv1b = ComplexConv2d(32, 32, kernel_size=3, padding=1)
         self.bn1b = ComplexBatchNorm2d(32)
-        self.act1b = ModReLU(32, bias_init=0.0)
-        self.pool1 = nn.MaxPool2d(2)  # 100 -> 50
+        self.act1b = ModReLU(32, bias_init=-0.5)
+        self.pool1 = ComplexAvgPool2d(2)  # 100 -> 50, 使用复数平均池化
         
         # Block 2: 32 -> 64 channels
         self.conv2a = ComplexConv2d(32, 64, kernel_size=3, padding=1)
         self.bn2a = ComplexBatchNorm2d(64)
-        self.act2a = ModReLU(64, bias_init=0.0)
+        self.act2a = ModReLU(64, bias_init=-0.5)
         self.conv2b = ComplexConv2d(64, 64, kernel_size=3, padding=1)
         self.bn2b = ComplexBatchNorm2d(64)
-        self.act2b = ModReLU(64, bias_init=0.0)
-        self.pool2 = nn.MaxPool2d(2)  # 50 -> 25
+        self.act2b = ModReLU(64, bias_init=-0.5)
+        self.pool2 = ComplexAvgPool2d(2)  # 50 -> 25, 使用复数平均池化
         
         # Block 3: 64 -> 128 channels
         self.conv3a = ComplexConv2d(64, 128, kernel_size=3, padding=1)
         self.bn3a = ComplexBatchNorm2d(128)
-        self.act3a = ModReLU(128, bias_init=0.0)
+        self.act3a = ModReLU(128, bias_init=-0.5)
         self.pool3 = nn.AdaptiveAvgPool2d(1)  # Global Average Pooling
         
         # 实值输出层
@@ -128,13 +128,12 @@ class CVNN_Improved(nn.Module):
         # Block 1
         x = self.act1a(self.bn1a(self.conv1a(x)))
         x = self.act1b(self.bn1b(self.conv1b(x)))
-        # 池化: 分离处理实部虚部 (PyTorch池化不直接支持复数)
-        x = torch.complex(self.pool1(x.real), self.pool1(x.imag))
+        x = self.pool1(x)  # 复数平均池化保持相位完整性
         
         # Block 2
         x = self.act2a(self.bn2a(self.conv2a(x)))
         x = self.act2b(self.bn2b(self.conv2b(x)))
-        x = torch.complex(self.pool2(x.real), self.pool2(x.imag))
+        x = self.pool2(x)  # 复数平均池化保持相位完整性
         
         # Block 3
         x = self.act3a(self.bn3a(self.conv3a(x)))
