@@ -237,7 +237,9 @@ def save_checkpoint(model, optimizer, scheduler, epoch, metrics, filepath):
 def main():
     parser = argparse.ArgumentParser(description='FDA-MIMO CVNN 多GPU训练 (预缓存版)')
     
-    parser.add_argument('--model', type=str, default='cvnn', choices=['cvnn', 'real'])
+    parser.add_argument('--model', type=str, default='cvnn', 
+                        choices=['cvnn', 'pro', 'real'],
+                        help='模型: cvnn(~300K), pro(~6.8M), real')
     parser.add_argument('--dropout', type=float, default=0.2)
     
     parser.add_argument('--epochs', type=int, default=100)

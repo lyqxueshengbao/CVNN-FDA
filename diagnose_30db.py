@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import time
 
-from model import CVNN_Improved
+from model import CVNN_Improved, CVNN_Pro, get_model
 from config import r_min, r_max, theta_min, theta_max
 from utils import generate_echo_signal, compute_sample_covariance_matrix, complex_normalize
 
@@ -41,6 +41,9 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--model', type=str, default='pro', 
+                        choices=['cvnn', 'pro', 'real'],
+                        help='模型类型: cvnn(~300K), pro(~6.8M), real')
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -54,6 +57,7 @@ def main():
     print(f'设备: {device}')
     if torch.cuda.is_available():
         print(f'GPU: {torch.cuda.get_device_name(0)}')
+    print(f'模型: {args.model}')
     print(f'SNR: {args.snr}dB (高SNR，几乎无噪声)')
     print(f'训练集: {args.train_size}, 验证集: {args.val_size}')
     print(f'Epochs: {args.epochs}, Batch: {args.batch_size}, LR: {args.lr}')
@@ -79,12 +83,13 @@ def main():
     )
 
     # 模型
-    model = CVNN_Improved().to(device)
+    model = get_model(args.model).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     criterion = nn.MSELoss()
 
-    print(f'模型参数: {sum(p.numel() for p in model.parameters()):,}')
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f'模型参数: {num_params:,}')
     print()
     print('开始训练...')
     print('-'*70)

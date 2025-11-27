@@ -19,6 +19,8 @@ from complex_layers import (
     ComplexLinear,
     ComplexBatchNorm2d,
     ComplexBatchNorm1d,
+    ComplexAvgPool2d,
+    ComplexDropout,
     ComplexFlatten,
 )
 from config import MN
@@ -151,6 +153,157 @@ class CVNN_Improved(nn.Module):
 # 对比模型: RealCNN (作为基线对比)
 # ============================================================================
 
+class ComplexResidualBlock(nn.Module):
+    """复数残差块"""
+    def __init__(self, channels: int, use_batchnorm: bool = True):
+        super().__init__()
+        self.conv1 = ComplexConv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = ComplexBatchNorm2d(channels) if use_batchnorm else nn.Identity()
+        self.act1 = ModReLU(channels, bias_init=0.0)
+        self.conv2 = ComplexConv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = ComplexBatchNorm2d(channels) if use_batchnorm else nn.Identity()
+        self.act2 = ModReLU(channels, bias_init=0.0)
+    
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
+        out = self.act1(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = out + identity  # 残差连接
+        out = self.act2(out)
+        return out
+
+
+class CVNN_Pro(nn.Module):
+    """
+    增强版 CVNN 估计器 - 带残差连接的深度网络
+    
+    专为高精度参数估计设计:
+    - 更深的网络结构 (7个残差块)
+    - 残差连接防止梯度消失
+    - 更多的特征通道 (64->128->256->512)
+    - 全局平均池化减少参数
+    
+    参数量: ~6.8M (vs CVNN_Improved ~300K)
+    """
+    
+    def __init__(self, dropout_rate: float = 0.2, use_batchnorm: bool = True):
+        super().__init__()
+        
+        self.use_batchnorm = use_batchnorm
+        
+        # ==================== Stage 1: 初始卷积 ====================
+        # 100x100 -> 100x100, 1 -> 64 channels
+        self.conv_in = ComplexConv2d(1, 64, kernel_size=7, padding=3)
+        self.bn_in = ComplexBatchNorm2d(64) if use_batchnorm else nn.Identity()
+        self.act_in = ModReLU(64, bias_init=0.0)
+        
+        # ==================== Stage 2: 残差块组 ====================
+        # 100x100, 64 channels
+        self.res_block1 = ComplexResidualBlock(64, use_batchnorm)
+        self.res_block2 = ComplexResidualBlock(64, use_batchnorm)
+        
+        # 下采样: 100x100 -> 50x50, 64 -> 128 channels
+        self.down1 = ComplexConv2d(64, 128, kernel_size=3, stride=2, padding=1)
+        self.bn_down1 = ComplexBatchNorm2d(128) if use_batchnorm else nn.Identity()
+        self.act_down1 = ModReLU(128, bias_init=0.0)
+        
+        # 50x50, 128 channels
+        self.res_block3 = ComplexResidualBlock(128, use_batchnorm)
+        self.res_block4 = ComplexResidualBlock(128, use_batchnorm)
+        
+        # 下采样: 50x50 -> 25x25, 128 -> 256 channels
+        self.down2 = ComplexConv2d(128, 256, kernel_size=3, stride=2, padding=1)
+        self.bn_down2 = ComplexBatchNorm2d(256) if use_batchnorm else nn.Identity()
+        self.act_down2 = ModReLU(256, bias_init=0.0)
+        
+        # 25x25, 256 channels
+        self.res_block5 = ComplexResidualBlock(256, use_batchnorm)
+        self.res_block6 = ComplexResidualBlock(256, use_batchnorm)
+        
+        # 下采样: 25x25 -> 13x13, 256 -> 512 channels
+        self.down3 = ComplexConv2d(256, 512, kernel_size=3, stride=2, padding=1)
+        self.bn_down3 = ComplexBatchNorm2d(512) if use_batchnorm else nn.Identity()
+        self.act_down3 = ModReLU(512, bias_init=0.0)
+        
+        # 13x13, 512 channels
+        self.res_block7 = ComplexResidualBlock(512, use_batchnorm)
+        
+        # ==================== Stage 3: 全局平均池化 ====================
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        # ==================== Stage 4: 全连接头 ====================
+        self.flatten = ComplexFlatten()
+        
+        self.fc1 = ComplexLinear(512, 256)
+        self.bn_fc1 = ComplexBatchNorm1d(256) if use_batchnorm else nn.Identity()
+        self.act_fc1 = ModReLU(256, bias_init=0.0)
+        self.dropout1 = ComplexDropout(p=dropout_rate)
+        
+        self.fc2 = ComplexLinear(256, 64)
+        self.bn_fc2 = ComplexBatchNorm1d(64) if use_batchnorm else nn.Identity()
+        self.act_fc2 = ModReLU(64, bias_init=0.0)
+        self.dropout2 = ComplexDropout(p=dropout_rate)
+        
+        # 输出层: 64复数 -> 128实数 -> 2
+        self.fc_out = nn.Linear(128, 2)
+        
+        # 初始化权重
+        self._init_weights()
+    
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, ComplexConv2d):
+                nn.init.kaiming_normal_(m.conv_real.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.conv_imag.weight, mode='fan_out', nonlinearity='relu')
+                if m.conv_real.bias is not None:
+                    nn.init.zeros_(m.conv_real.bias)
+                    nn.init.zeros_(m.conv_imag.bias)
+            elif isinstance(m, ComplexLinear):
+                nn.init.xavier_uniform_(m.linear_real.weight)
+                nn.init.xavier_uniform_(m.linear_imag.weight)
+                if m.linear_real.bias is not None:
+                    nn.init.zeros_(m.linear_real.bias)
+                    nn.init.zeros_(m.linear_imag.bias)
+    
+    def forward(self, x: Tensor) -> Tensor:
+        # 输入转换: 2通道实数 -> 复数
+        if not x.is_complex():
+            if x.shape[1] == 2:
+                x = torch.complex(x[:, 0:1], x[:, 1:2])
+        
+        # Stage 1: 初始卷积
+        x = self.act_in(self.bn_in(self.conv_in(x)))
+        
+        # Stage 2: 残差块 + 下采样
+        x = self.res_block1(x)
+        x = self.res_block2(x)
+        x = self.act_down1(self.bn_down1(self.down1(x)))
+        
+        x = self.res_block3(x)
+        x = self.res_block4(x)
+        x = self.act_down2(self.bn_down2(self.down2(x)))
+        
+        x = self.res_block5(x)
+        x = self.res_block6(x)
+        x = self.act_down3(self.bn_down3(self.down3(x)))
+        
+        x = self.res_block7(x)
+        
+        # Stage 3: 全局平均池化 (分别处理实部虚部)
+        x = torch.complex(self.global_pool(x.real), self.global_pool(x.imag))
+        
+        # Stage 4: 全连接头
+        x = self.flatten(x)
+        x = self.dropout1(self.act_fc1(self.bn_fc1(self.fc1(x))))
+        x = self.dropout2(self.act_fc2(self.bn_fc2(self.fc2(x))))
+        
+        # 输出层: 拼接实部和虚部
+        x_concat = torch.cat([x.real, x.imag], dim=-1)
+        out = torch.sigmoid(self.fc_out(x_concat))
+        
+        return out
+
+
 class RealCNN_Estimator(nn.Module):
     """
     实值CNN估计器 (作为基线对比)
@@ -206,7 +359,8 @@ def get_model(model_name: str = 'cvnn', **kwargs) -> nn.Module:
     
     Args:
         model_name: 模型名称
-            - 'cvnn' / 'cvnn_improved': 改进的CVNN (推荐，默认)
+            - 'cvnn' / 'cvnn_improved': 改进的CVNN (~300K参数)
+            - 'pro' / 'cvnn_pro': 深度残差CVNN (~6.8M参数, 推荐)
             - 'real' / 'real_cnn': 实值CNN (基线对比)
         **kwargs: 传递给模型的额外参数
     
@@ -216,6 +370,8 @@ def get_model(model_name: str = 'cvnn', **kwargs) -> nn.Module:
     models = {
         'cvnn': CVNN_Improved,
         'cvnn_improved': CVNN_Improved,
+        'pro': CVNN_Pro,
+        'cvnn_pro': CVNN_Pro,
         'real': RealCNN_Estimator,
         'real_cnn': RealCNN_Estimator,
     }
