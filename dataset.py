@@ -6,7 +6,27 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import config as cfg
-from utils_physics import generate_covariance_matrix
+from utils_physics import generate_covariance_matrix, generate_batch_torch
+
+
+class FastDataLoader:
+    """
+    极速数据加载器 - 直接在GPU上生成数据
+    替代标准的 DataLoader，避免 CPU->GPU 传输瓶颈
+    """
+    def __init__(self, batch_size, num_samples, snr_range=None, device=cfg.device):
+        self.batch_size = batch_size
+        self.num_samples = num_samples
+        self.num_batches = num_samples // batch_size
+        self.snr_range = snr_range
+        self.device = device
+        
+    def __iter__(self):
+        for _ in range(self.num_batches):
+            yield generate_batch_torch(self.batch_size, self.device, self.snr_range)
+            
+    def __len__(self):
+        return self.num_batches
 
 
 class FDADataset(Dataset):

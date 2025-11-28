@@ -2,7 +2,104 @@
 FDA-MIMO 物理信号生成与协方差矩阵计算
 """
 import numpy as np
+import torch
 import config as cfg
+
+
+def generate_batch_torch(batch_size, device=cfg.device, snr_range=None):
+    """
+    在GPU上直接生成批次数据 (极速模式)
+    
+    参数:
+        batch_size: 批次大小
+        device: 设备
+        snr_range: (min, max) SNR范围
+    
+    返回:
+        R_tensor: [B, 2, MN, MN]
+        labels: [B, 2]
+    """
+    # 物理常量
+    c = cfg.c
+    delta_f = cfg.delta_f
+    d = cfg.d
+    wavelength = cfg.wavelength
+    M = cfg.M
+    N = cfg.N
+    L = cfg.L_snapshots
+    
+    # 1. 随机生成参数 [B, 1]
+    r = torch.rand(batch_size, 1, device=device) * (cfg.r_max - cfg.r_min) + cfg.r_min
+    theta = torch.rand(batch_size, 1, device=device) * (cfg.theta_max - cfg.theta_min) + cfg.theta_min
+    
+    if snr_range is None:
+        snr_min, snr_max = cfg.snr_train_min, cfg.snr_train_max
+    else:
+        snr_min, snr_max = snr_range
+        
+    snr_db = torch.rand(batch_size, 1, device=device) * (snr_max - snr_min) + snr_min
+    
+    theta_rad = torch.deg2rad(theta)
+    
+    # 2. 构建导向矢量
+    # m: [1, M], n: [1, N]
+    m = torch.arange(M, device=device).float().unsqueeze(0)
+    n = torch.arange(N, device=device).float().unsqueeze(0)
+    
+    # 发射导向矢量 a_tx: [B, M]
+    # 相位1: 距离项 -4π * Δf * m * r / c
+    phi_range = -4 * torch.pi * delta_f * m * r / c
+    # 相位2: 角度项 2π * d * m * sin(θ) / λ
+    phi_angle_tx = 2 * torch.pi * d * m * torch.sin(theta_rad) / wavelength
+    a_tx = torch.exp(1j * (phi_range + phi_angle_tx))
+    
+    # 接收导向矢量 a_rx: [B, N]
+    phi_angle_rx = 2 * torch.pi * d * n * torch.sin(theta_rad) / wavelength
+    a_rx = torch.exp(1j * phi_angle_rx)
+    
+    # 联合导向矢量 u = a_tx ⊗ a_rx: [B, MN]
+    # 利用广播机制: [B, M, 1] * [B, 1, N] -> [B, M, N] -> [B, MN]
+    u = (a_tx.unsqueeze(2) * a_rx.unsqueeze(1)).view(batch_size, -1)
+    u = u.unsqueeze(2) # [B, MN, 1]
+    
+    # 3. 生成信号 s: [B, 1, L]
+    # 复高斯信号
+    s_real = torch.randn(batch_size, 1, L, device=device)
+    s_imag = torch.randn(batch_size, 1, L, device=device)
+    s = (s_real + 1j * s_imag) / np.sqrt(2)
+    
+    # 纯信号 X_clean: [B, MN, L]
+    X_clean = torch.matmul(u, s)
+    
+    # 4. 生成噪声 noise: [B, MN, L]
+    n_real = torch.randn(batch_size, M*N, L, device=device)
+    n_imag = torch.randn(batch_size, M*N, L, device=device)
+    noise = (n_real + 1j * n_imag) / np.sqrt(2)
+    
+    # 5. 计算功率并混合
+    # 信号功率 (对 MN 和 L 维度求平均)
+    power_sig = torch.mean(torch.abs(X_clean)**2, dim=(1,2), keepdim=True)
+    power_noise = power_sig / (10**(snr_db.unsqueeze(2)/10.0))
+    
+    X = X_clean + torch.sqrt(power_noise) * noise
+    
+    # 6. 计算协方差矩阵 R: [B, MN, MN]
+    # R = X @ X^H / L
+    R = torch.matmul(X, X.transpose(1, 2).conj()) / L
+    
+    # 7. 归一化
+    max_val = torch.amax(torch.abs(R), dim=(1,2), keepdim=True)
+    R = R / (max_val + 1e-10)
+    
+    # 8. 转换为实部/虚部通道: [B, 2, MN, MN]
+    R_tensor = torch.stack([R.real, R.imag], dim=1).float()
+    
+    # 9. 标签归一化
+    r_norm = r / cfg.r_max
+    theta_norm = (theta - cfg.theta_min) / (cfg.theta_max - cfg.theta_min)
+    labels = torch.cat([r_norm, theta_norm], dim=1).float()
+    
+    return R_tensor, labels
 
 
 def get_steering_vector(r, theta):

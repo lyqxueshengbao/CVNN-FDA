@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 import config as cfg
 from model import FDA_CVNN, FDA_CVNN_Light
-from dataset import create_dataloaders
+from dataset import create_dataloaders, FastDataLoader
 from utils_physics import denormalize_labels
 
 
@@ -185,11 +185,21 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     print(f"模型参数量: {model.count_parameters():,}")
     
     # 创建数据加载器
-    train_loader, val_loader, _ = create_dataloaders(
-        train_samples=train_samples,
+    # 1. 获取验证集和测试集 (保持离线固定模式，确保评估一致性)
+    _, val_loader, _ = create_dataloaders(
+        train_samples=100, # 占位，不使用
         batch_size=batch_size,
         snr_train_range=snr_train_range,
-        online_train=True  # 在线生成训练数据
+        online_train=True
+    )
+    
+    # 2. 使用 FastDataLoader 加速训练 (GPU直接生成)
+    print("启用 GPU 加速数据生成...")
+    train_loader = FastDataLoader(
+        batch_size=batch_size,
+        num_samples=train_samples,
+        snr_range=snr_train_range,
+        device=device
     )
     
     # 优化器和损失函数

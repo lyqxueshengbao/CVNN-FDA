@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 import config as cfg
 from models_baseline import RealCNN
-from dataset import create_dataloaders
+from dataset import create_dataloaders, FastDataLoader
 from utils_physics import denormalize_labels
 from train import RangeAngleLoss, compute_metrics  # 复用 CVNN 的损失函数和评估指标
 
@@ -92,10 +92,19 @@ def train_real_cnn(epochs=None, lr=None, batch_size=None, train_samples=None):
     print(f"模型参数量: {model.count_parameters():,}")
     
     # 创建数据加载器
-    train_loader, val_loader, _ = create_dataloaders(
-        train_samples=train_samples,
+    # 1. 获取验证集
+    _, val_loader, _ = create_dataloaders(
+        train_samples=100,
         batch_size=batch_size,
         online_train=True
+    )
+    
+    # 2. 使用 FastDataLoader 加速训练
+    print("启用 GPU 加速数据生成...")
+    train_loader = FastDataLoader(
+        batch_size=batch_size,
+        num_samples=train_samples,
+        device=device
     )
     
     # 优化器和损失函数 (与 CVNN 保持一致)
