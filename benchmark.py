@@ -23,13 +23,14 @@ from utils_physics import generate_covariance_matrix, get_steering_vector
 
 
 # ==========================================
-# 0. 克拉美-罗界 (CRB) 计算
+# 0. 克拉美-罗界 (CRB) 计算 [已修正]
 # ==========================================
 def compute_crb(snr_db, L=None, M=None, N=None):
     """
     计算 FDA-MIMO 系统的克拉美-罗界 (Cramér-Rao Bound)
     
-    对于距离和角度联合估计，CRB 给出了无偏估计器方差的理论下界
+    标准 ULA CRB 公式: 
+    RMSE >= sqrt( 6 / (L * SNR * (2πd/λ)^2 * N(N^2-1)) )
     
     参数:
         snr_db: 信噪比 (dB)
@@ -53,37 +54,21 @@ def compute_crb(snr_db, L=None, M=None, N=None):
     delta_f = cfg.delta_f
     d = cfg.d
     wavelength = cfg.wavelength
-    f0 = cfg.f0
     
-    # FDA-MIMO Fisher 信息矩阵 (FIM) 的近似计算
-    # 参考: "FDA Radar Signal Processing" 相关文献
-    
-    # 对于均匀线阵，角度估计的 CRB:
-    # var(theta) >= 6 / (L * SNR * (2*pi*d/lambda)^2 * N * (N^2 - 1))
-    # 
-    # 对于 FDA，距离估计的 CRB:
-    # var(r) >= c^2 / (L * SNR * (4*pi*delta_f)^2 * M * (M^2 - 1) / 12)
-    
-    # 角度 CRB (基于接收阵列)
-    # 标准 ULA 角度估计 CRB
+    # --- 1. 角度估计 CRB ---
+    # 因子: (2π * d / λ)^2
     factor_theta = (2 * np.pi * d / wavelength) ** 2
-    # 对于 N 元 ULA: var >= 6 / (L * SNR * factor * N * (N^2-1))
-    # 简化形式，假设角度在 broadside 附近
-    var_sin_theta = 6.0 / (L * snr_linear * factor_theta * N * (N**2 - 1) / 12)
-    # 转换为角度方差 (小角度近似: d(theta) ≈ d(sin(theta)) / cos(theta))
-    # 在 broadside (theta=0) 时 cos(theta)=1
-    var_theta_rad = var_sin_theta  # 近似
-    crb_theta_deg = np.sqrt(var_theta_rad) * 180 / np.pi
+    # 标准 ULA 公式: var = 6 / (L * SNR * factor * N(N^2-1))
+    var_sin_theta = 6.0 / (L * snr_linear * factor_theta * N * (N**2 - 1))
+    # 转换为角度 (度)
+    crb_theta_deg = np.sqrt(var_sin_theta) * 180 / np.pi
     
-    # 距离 CRB (基于 FDA 频率增量)
-    # FDA 的距离分辨能力来自频率增量 delta_f
-    # var(r) >= c^2 / (L * SNR * (4*pi*delta_f/c)^2 * M * (M^2-1) / 12)
+    # --- 2. 距离估计 CRB ---
+    # 因子: (4π * Δf / c)^2
     factor_r = (4 * np.pi * delta_f / c) ** 2
-    var_r = 1.0 / (L * snr_linear * factor_r * M * (M**2 - 1) / 12)
+    # 公式: var = 6 / (L * SNR * factor * M(M^2-1))
+    var_r = 6.0 / (L * snr_linear * factor_r * M * (M**2 - 1))
     crb_r = np.sqrt(var_r)
-    
-    # 联合估计会有耦合，但作为下界参考，这是合理的近似
-    # 实际 CRB 需要计算完整的 FIM 并求逆
     
     return crb_r, crb_theta_deg
 
@@ -614,16 +599,22 @@ def plot_results(snr_list, results):
     
     # 分离算法和 CRB
     methods = [m for m in results.keys() if m != "CRB"]
-    colors = ['b', 'g', 'r', 'c', 'm', 'orange']
-    markers = ['o', '^', 's', 'd', 'v', 'p']
+    colors = {'CVNN': 'b', 'Real-CNN': 'g', 'MUSIC': 'r', 
+              'ESPRIT': 'c', 'OMP': 'm', 'RAM': 'orange'}
+    markers = {'CVNN': 'o', 'Real-CNN': '^', 'MUSIC': 's', 
+               'ESPRIT': 'd', 'OMP': 'v', 'RAM': 'p'}
     
     plt.figure(figsize=(18, 12))
     
     # 图1: 距离精度对比 (含 CRB)
+    # 注意: ESPRIT 在 FDA 距离估计上可能失效，如果误差过大则跳过
     plt.subplot(2, 2, 1)
-    for i, m in enumerate(methods):
+    for m in methods:
+        # 如果 ESPRIT 距离误差 > 500m，说明失效，跳过以免破坏坐标轴
+        if m == "ESPRIT" and np.mean(results[m]["rmse_r"]) > 500:
+            continue
         plt.plot(snr_list, results[m]["rmse_r"], 
-                 color=colors[i], marker=markers[i], 
+                 color=colors.get(m, 'gray'), marker=markers.get(m, 'x'), 
                  label=m, linewidth=2, markersize=8)
     # 绘制 CRB (虚线，黑色)
     plt.plot(snr_list, results["CRB"]["rmse_r"], 
@@ -637,9 +628,9 @@ def plot_results(snr_list, results):
     
     # 图2: 角度精度对比 (含 CRB)
     plt.subplot(2, 2, 2)
-    for i, m in enumerate(methods):
+    for m in methods:
         plt.plot(snr_list, results[m]["rmse_theta"], 
-                 color=colors[i], marker=markers[i], 
+                 color=colors.get(m, 'gray'), marker=markers.get(m, 'x'), 
                  label=m, linewidth=2, markersize=8)
     # 绘制 CRB
     plt.plot(snr_list, results["CRB"]["rmse_theta"], 
@@ -653,10 +644,10 @@ def plot_results(snr_list, results):
     
     # 图3: 耗时对比 (对数坐标，不含 CRB)
     plt.subplot(2, 2, 3)
-    for i, m in enumerate(methods):
+    for m in methods:
         t_ms = [t * 1000 for t in results[m]["time"]]
         plt.plot(snr_list, t_ms, 
-                 color=colors[i], marker=markers[i], 
+                 color=colors.get(m, 'gray'), marker=markers.get(m, 'x'), 
                  label=m, linewidth=2, markersize=8)
     plt.xlabel('SNR (dB)', fontsize=12)
     plt.ylabel('Inference Time (ms)', fontsize=12)
