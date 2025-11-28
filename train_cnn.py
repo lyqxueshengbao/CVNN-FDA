@@ -172,9 +172,16 @@ def train_real_cnn(epochs=None, lr=None, batch_size=None, train_samples=None):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--epochs', type=int, default=None)
-    parser.add_argument('--samples', type=int, default=None)
+    parser = argparse.ArgumentParser(description='Real-CNN 基线模型训练')
+    parser.add_argument('--epochs', type=int, default=150, help='训练轮数')
+    parser.add_argument('--samples', type=int, default=50000, help='训练样本数')
+    parser.add_argument('--batch', type=int, default=512, help='批次大小')
+    parser.add_argument('--lr', type=float, default=5e-4, help='学习率')
     args = parser.parse_args()
     
-    train_real_cnn(epochs=args.epochs, train_samples=args.samples)
+    train_real_cnn(
+        epochs=args.epochs, 
+        train_samples=args.samples,
+        batch_size=args.batch,
+        lr=args.lr
+    )

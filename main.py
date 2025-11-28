@@ -164,8 +164,10 @@ def main():
     parser.add_argument('--test', action='store_true', help='运行所有测试')
     parser.add_argument('--train', action='store_true', help='开始训练')
     parser.add_argument('--quick', action='store_true', help='快速训练测试')
-    parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
-    parser.add_argument('--samples', type=int, default=10000, help='训练样本数')
+    parser.add_argument('--epochs', type=int, default=150, help='训练轮数')
+    parser.add_argument('--samples', type=int, default=50000, help='训练样本数')
+    parser.add_argument('--batch', type=int, default=512, help='批次大小')
+    parser.add_argument('--lr', type=float, default=5e-4, help='学习率')
     
     args = parser.parse_args()
     
@@ -197,7 +199,9 @@ def main():
         train(
             model_type='standard',
             epochs=args.epochs,
-            train_samples=args.samples
+            train_samples=args.samples,
+            batch_size=args.batch,
+            lr=args.lr
         )
     else:
         # 默认运行测试
@@ -205,7 +209,7 @@ def main():
         print("  python main.py --test    # 运行所有测试")
         print("  python main.py --quick   # 快速训练测试")
         print("  python main.py --train   # 正式训练")
-        print("  python main.py --train --epochs 200 --samples 20000")
+        print("  python main.py --train --epochs 150 --samples 50000 --batch 1024 --lr 5e-4")
 
 
 if __name__ == "__main__":
