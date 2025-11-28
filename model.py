@@ -31,32 +31,33 @@ class FDA_CVNN(nn.Module):
         super().__init__()
         
         # 输入: [B, 2, 1, 100, 100] -> 需要调整为 [B, 2, 1, H, W]
+        # 通道数翻倍: 32 -> 64 -> 128，增强特征提取能力
         
         # Block 1: 100 -> 50
-        self.conv1 = ComplexConv2d(1, 16, kernel_size=3, padding=1)
-        self.bn1 = ComplexBatchNorm2d(16)
-        self.act1 = ModReLU(16, bias_init=-0.5)
+        self.conv1 = ComplexConv2d(1, 32, kernel_size=3, padding=1)
+        self.bn1 = ComplexBatchNorm2d(32)
+        self.act1 = ModReLU(32, bias_init=-0.5)
         self.pool1 = ComplexAvgPool2d(2)
         
         # Block 2: 50 -> 25
-        self.conv2 = ComplexConv2d(16, 32, kernel_size=3, padding=1)
-        self.bn2 = ComplexBatchNorm2d(32)
-        self.act2 = ModReLU(32, bias_init=-0.5)
+        self.conv2 = ComplexConv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = ComplexBatchNorm2d(64)
+        self.act2 = ModReLU(64, bias_init=-0.5)
         self.pool2 = ComplexAvgPool2d(2)
         
         # Block 3: 25 -> 5
-        self.conv3 = ComplexConv2d(32, 64, kernel_size=3, padding=1)
-        self.bn3 = ComplexBatchNorm2d(64)
-        self.act3 = ModReLU(64, bias_init=-0.5)
+        self.conv3 = ComplexConv2d(64, 128, kernel_size=3, padding=1)
+        self.bn3 = ComplexBatchNorm2d(128)
+        self.act3 = ModReLU(128, bias_init=-0.5)
         self.pool3 = ComplexAvgPool2d(5)
         
         # 全连接层
-        # 特征图大小: 5x5, 通道64, 实部+虚部
-        self.fc_in_dim = 64 * 5 * 5 * 2
+        # 特征图大小: 5x5, 通道128, 实部+虚部
+        self.fc_in_dim = 128 * 5 * 5 * 2  # 6400
         
-        self.fc1 = nn.Linear(self.fc_in_dim, 256)
-        self.fc2 = nn.Linear(256, 64)
-        self.fc3 = nn.Linear(64, 2)  # 输出 r 和 theta
+        self.fc1 = nn.Linear(self.fc_in_dim, 512)
+        self.fc2 = nn.Linear(512, 128)
+        self.fc3 = nn.Linear(128, 2)  # 输出 r 和 theta
         
         self.dropout = nn.Dropout(0.3)
         

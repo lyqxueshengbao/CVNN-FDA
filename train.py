@@ -15,6 +15,30 @@ from dataset import create_dataloaders
 from utils_physics import denormalize_labels
 
 
+class RangeAngleLoss(nn.Module):
+    """
+    距离-角度联合损失函数
+    使用 L1Loss 对小误差更敏感，突破 MSE 的梯度消失问题
+    """
+    def __init__(self, lambda_angle: float = 1.0, range_weight: float = 2.0):
+        super().__init__()
+        self.lambda_angle = lambda_angle
+        self.range_weight = range_weight
+        # 使用 L1Loss (MAE)，对小误差保持较大梯度
+        self.criterion = nn.L1Loss()
+    
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        r_pred, theta_pred = pred[:, 0], pred[:, 1]
+        r_target, theta_target = target[:, 0], target[:, 1]
+        
+        loss_r = self.criterion(r_pred, r_target)
+        loss_theta = self.criterion(theta_pred, theta_target)
+        
+        # 距离比角度难学，给距离加权重
+        total_loss = self.range_weight * loss_r + self.lambda_angle * loss_theta
+        return total_loss
+
+
 def compute_metrics(preds, labels):
     """
     计算评估指标
@@ -170,10 +194,12 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     
     # 优化器和损失函数
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10, verbose=True
+    # 使用余弦退火调度器，学习率平滑下降，有助于收敛到更深的山谷
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=1e-6
     )
-    criterion = nn.MSELoss()
+    # 使用 L1 损失函数，对小误差更敏感
+    criterion = RangeAngleLoss(lambda_angle=1.0, range_weight=2.0)
     
     # 训练历史
     history = {
@@ -200,8 +226,8 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         # 验证
         val_metrics = validate(model, val_loader, criterion, device)
         
-        # 学习率调整
-        scheduler.step(val_metrics['loss'])
+        # 学习率调整 (CosineAnnealingLR 不需要传参数)
+        scheduler.step()
         
         # 记录历史
         history['train_loss'].append(train_metrics['loss'])
