@@ -4,6 +4,9 @@ FDA-MIMO 雷达参数估计对比实验脚本
 1. Proposed CVNN (复数神经网络)
 2. 2D-MUSIC (传统超分辨算法)
 3. Real-CNN (实数神经网络基线)
+4. ESPRIT (旋转不变子空间法)
+5. OMP (正交匹配追踪)
+6. RAM (降维交替最小化，FDA专用)
 """
 import numpy as np
 import matplotlib.pyplot as plt
@@ -65,8 +68,228 @@ def music_2d(R, r_search, theta_search):
                 
     return best_r, best_theta
 
+
 # ==========================================
-# 2. 运行对比实验
+# 2. ESPRIT 算法实现
+# ==========================================
+def esprit_2d(R, M, N):
+    """
+    2D-ESPRIT 算法用于 FDA-MIMO
+    利用阵列的旋转不变性，无需谱搜索
+    
+    参数:
+        R: 协方差矩阵 (MN, MN)
+        M: 发射阵元数
+        N: 接收阵元数
+    
+    返回:
+        r_est, theta_est: 估计的距离和角度
+    """
+    MN = M * N
+    K = 1  # 单目标
+    
+    # 1. 特征分解，获取信号子空间
+    w, v = np.linalg.eigh(R)
+    # 取最大的 K 个特征值对应的特征向量作为信号子空间
+    Us = v[:, -K:]  # [MN, K]
+    
+    # 2. 构造选择矩阵 (用于提取子阵列)
+    # 对于 FDA-MIMO，我们需要分别处理发射和接收维度
+    
+    # 发射维度选择矩阵 (用于距离估计)
+    J1_tx = np.zeros((N*(M-1), MN))
+    J2_tx = np.zeros((N*(M-1), MN))
+    for i in range(M-1):
+        for j in range(N):
+            J1_tx[i*N + j, i*N + j] = 1
+            J2_tx[i*N + j, (i+1)*N + j] = 1
+    
+    # 接收维度选择矩阵 (用于角度估计)
+    J1_rx = np.zeros((M*(N-1), MN))
+    J2_rx = np.zeros((M*(N-1), MN))
+    for i in range(M):
+        for j in range(N-1):
+            J1_rx[i*(N-1) + j, i*N + j] = 1
+            J2_rx[i*(N-1) + j, i*N + j + 1] = 1
+    
+    # 3. 提取子阵列信号子空间
+    Us1_tx = J1_tx @ Us
+    Us2_tx = J2_tx @ Us
+    Us1_rx = J1_rx @ Us
+    Us2_rx = J2_rx @ Us
+    
+    # 4. 最小二乘估计旋转算子
+    # Φ = (Us1^H * Us1)^(-1) * Us1^H * Us2
+    try:
+        # 发射维度 (距离相关)
+        Phi_tx = np.linalg.lstsq(Us1_tx, Us2_tx, rcond=None)[0]
+        eigenvalues_tx = np.linalg.eigvals(Phi_tx)
+        
+        # 接收维度 (角度相关)
+        Phi_rx = np.linalg.lstsq(Us1_rx, Us2_rx, rcond=None)[0]
+        eigenvalues_rx = np.linalg.eigvals(Phi_rx)
+        
+        # 5. 从特征值中提取参数
+        # 发射相位: exp(j * (-4π*Δf*r/c + 2π*d*sin(θ)/λ))
+        # 接收相位: exp(j * 2π*d*sin(θ)/λ)
+        
+        phase_tx = np.angle(eigenvalues_tx[0])
+        phase_rx = np.angle(eigenvalues_rx[0])
+        
+        # 从接收相位估计角度
+        # phase_rx = 2π * d * sin(θ) / λ
+        sin_theta = phase_rx * cfg.wavelength / (2 * np.pi * cfg.d)
+        sin_theta = np.clip(sin_theta, -1, 1)
+        theta_est = np.rad2deg(np.arcsin(sin_theta))
+        
+        # 从发射相位估计距离
+        # phase_tx = -4π*Δf*r/c + 2π*d*sin(θ)/λ
+        # r = (2π*d*sin(θ)/λ - phase_tx) * c / (4π*Δf)
+        r_est = (2 * np.pi * cfg.d * sin_theta / cfg.wavelength - phase_tx) * cfg.c / (4 * np.pi * cfg.delta_f)
+        r_est = np.clip(r_est, 0, cfg.r_max)
+        
+    except:
+        # 如果计算失败，返回中间值
+        r_est = cfg.r_max / 2
+        theta_est = 0
+    
+    return float(np.real(r_est)), float(np.real(theta_est))
+
+
+# ==========================================
+# 3. OMP 算法实现
+# ==========================================
+def omp_2d(R, r_grid, theta_grid, K=1):
+    """
+    2D-OMP (正交匹配追踪) 算法
+    基于稀疏重构的参数估计
+    
+    参数:
+        R: 协方差矩阵 (MN, MN)
+        r_grid: 距离搜索网格
+        theta_grid: 角度搜索网格
+        K: 目标数量
+    
+    返回:
+        r_est, theta_est: 估计的距离和角度
+    """
+    MN = cfg.M * cfg.N
+    
+    # 从协方差矩阵提取主特征向量作为观测向量
+    w, v = np.linalg.eigh(R)
+    y = v[:, -1]  # 最大特征值对应的特征向量 [MN,]
+    
+    # 构造字典矩阵 A: 每列是一个导向矢量
+    num_r = len(r_grid)
+    num_theta = len(theta_grid)
+    A = np.zeros((MN, num_r * num_theta), dtype=complex)
+    
+    for i, r in enumerate(r_grid):
+        for j, theta in enumerate(theta_grid):
+            A[:, i * num_theta + j] = get_steering_vector(r, theta)
+    
+    # OMP 迭代
+    residual = y.copy()
+    support = []
+    
+    for _ in range(K):
+        # 计算相关性
+        correlations = np.abs(A.conj().T @ residual)
+        
+        # 找到最大相关性的原子
+        best_idx = np.argmax(correlations)
+        support.append(best_idx)
+        
+        # 更新残差 (正交投影)
+        A_s = A[:, support]
+        x_s = np.linalg.lstsq(A_s, y, rcond=None)[0]
+        residual = y - A_s @ x_s
+    
+    # 从支撑集中提取参数
+    best_idx = support[0]
+    r_idx = best_idx // num_theta
+    theta_idx = best_idx % num_theta
+    
+    r_est = r_grid[r_idx]
+    theta_est = theta_grid[theta_idx]
+    
+    return r_est, theta_est
+
+
+# ==========================================
+# 4. RAM 算法实现 (FDA专用)
+# ==========================================
+def ram_fda(R, r_grid, theta_grid, max_iter=10):
+    """
+    RAM (Reduced-dimension Alternating Minimization) 算法
+    专门针对 FDA-MIMO 的降维交替最小化算法
+    
+    核心思想：交替固定距离/角度，降维搜索另一个参数
+    
+    参数:
+        R: 协方差矩阵 (MN, MN)
+        r_grid: 距离搜索网格
+        theta_grid: 角度搜索网格
+        max_iter: 最大迭代次数
+    
+    返回:
+        r_est, theta_est: 估计的距离和角度
+    """
+    M, N = cfg.M, cfg.N
+    
+    # 特征分解
+    w, v = np.linalg.eigh(R)
+    Un = v[:, :-1]  # 噪声子空间
+    
+    # 初始化：用 MUSIC 粗搜索的结果
+    # 使用稀疏网格快速初始化
+    r_coarse = np.linspace(0, cfg.r_max, 20)
+    theta_coarse = np.linspace(cfg.theta_min, cfg.theta_max, 20)
+    
+    best_r = cfg.r_max / 2
+    best_theta = 0
+    max_spectrum = -1
+    
+    for r in r_coarse:
+        for theta in theta_coarse:
+            a = get_steering_vector(r, theta)
+            proj = Un.conj().T @ a
+            spectrum = 1.0 / (np.sum(np.abs(proj)**2) + 1e-10)
+            if spectrum > max_spectrum:
+                max_spectrum = spectrum
+                best_r = r
+                best_theta = theta
+    
+    r_est = best_r
+    theta_est = best_theta
+    
+    # 交替迭代优化
+    for _ in range(max_iter):
+        # Step 1: 固定 theta，优化 r
+        max_spectrum = -1
+        for r in r_grid:
+            a = get_steering_vector(r, theta_est)
+            proj = Un.conj().T @ a
+            spectrum = 1.0 / (np.sum(np.abs(proj)**2) + 1e-10)
+            if spectrum > max_spectrum:
+                max_spectrum = spectrum
+                r_est = r
+        
+        # Step 2: 固定 r，优化 theta
+        max_spectrum = -1
+        for theta in theta_grid:
+            a = get_steering_vector(r_est, theta)
+            proj = Un.conj().T @ a
+            spectrum = 1.0 / (np.sum(np.abs(proj)**2) + 1e-10)
+            if spectrum > max_spectrum:
+                max_spectrum = spectrum
+                theta_est = theta
+    
+    return r_est, theta_est
+
+
+# ==========================================
+# 5. 运行对比实验
 # ==========================================
 def run_benchmark():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -110,112 +333,116 @@ def run_benchmark():
     
     # 参数设置
     snr_list = [-10, 0, 10, 20, 30]
-    num_samples = 50  # 每个SNR测试样本数 (MUSIC太慢，设小一点)
+    num_samples = 50  # 每个SNR测试样本数 (传统算法较慢)
     
     # 结果存储 (同时记录距离和角度)
-    results = {
-        "CVNN": {"rmse_r": [], "rmse_theta": [], "time": []},
-        "MUSIC": {"rmse_r": [], "rmse_theta": [], "time": []},
-        "Real-CNN": {"rmse_r": [], "rmse_theta": [], "time": []}
-    }
+    methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP", "RAM"]
+    results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     
-    # MUSIC 搜索网格 (加密以提高精度)
-    # 注意：网格越细，MUSIC 越慢，但精度越高
-    r_grid = np.linspace(0, 2000, 200)    # 10m 步长 (原来40m)
-    theta_grid = np.linspace(-60, 60, 60) # 2度 步长 (原来4度)
+    # 搜索网格
+    r_grid = np.linspace(0, 2000, 200)    # 10m 步长
+    theta_grid = np.linspace(-60, 60, 60) # 2度 步长
+    
+    # OMP 用稀疏网格 (否则字典太大)
+    r_grid_omp = np.linspace(0, 2000, 100)    # 20m 步长
+    theta_grid_omp = np.linspace(-60, 60, 40) # 3度 步长
     
     print(f"\n开始对比实验 (样本数={num_samples})...")
-    print(f"MUSIC 网格大小: {len(r_grid)}x{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点")
+    print(f"对比算法: {methods}")
+    print(f"MUSIC/RAM 网格: {len(r_grid)}x{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点")
+    print(f"OMP 字典大小: {len(r_grid_omp)}x{len(theta_grid_omp)} = {len(r_grid_omp)*len(theta_grid_omp)} 原子")
     
     for snr in snr_list:
         print(f"\n正在测试 SNR = {snr} dB ...")
         
-        # 距离误差
-        err_r_cvnn = []
-        err_r_music = []
-        err_r_real = []
-        
-        # 角度误差
-        err_theta_cvnn = []
-        err_theta_music = []
-        err_theta_real = []
-        
-        t_cvnn = []
-        t_music = []
-        t_real = []
+        # 各算法误差存储
+        errors = {m: {"r": [], "theta": [], "time": []} for m in methods}
         
         for _ in tqdm(range(num_samples)):
             # 生成数据
             r_true = np.random.uniform(0, 2000)
             theta_true = np.random.uniform(-60, 60)
             R = generate_covariance_matrix(r_true, theta_true, snr)
+            R_complex = R[0] + 1j * R[1]  # 复数形式
             
             # --- 1. 测试 CVNN ---
             t0 = time.time()
-            R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device) # [1, 2, MN, MN]
+            R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device)
             with torch.no_grad():
                 pred = cvnn(R_tensor).cpu().numpy()[0]
-            r_pred_cvnn = pred[0] * 2000
-            theta_pred_cvnn = pred[1] * 120 - 60  # 反归一化: [0,1] -> [-60, 60]
+            r_pred = pred[0] * 2000
+            theta_pred = pred[1] * 120 - 60
             t1 = time.time()
-            
-            err_r_cvnn.append((r_pred_cvnn - r_true)**2)
-            err_theta_cvnn.append((theta_pred_cvnn - theta_true)**2)
-            t_cvnn.append(t1 - t0)
+            errors["CVNN"]["r"].append((r_pred - r_true)**2)
+            errors["CVNN"]["theta"].append((theta_pred - theta_true)**2)
+            errors["CVNN"]["time"].append(t1 - t0)
             
             # --- 2. 测试 Real-CNN ---
             t0 = time.time()
             with torch.no_grad():
-                pred_real = real_cnn(R_tensor).cpu().numpy()[0]
-            r_pred_real = pred_real[0] * 2000
-            theta_pred_real = pred_real[1] * 120 - 60
+                pred = real_cnn(R_tensor).cpu().numpy()[0]
+            r_pred = pred[0] * 2000
+            theta_pred = pred[1] * 120 - 60
             t1 = time.time()
-            
-            err_r_real.append((r_pred_real - r_true)**2)
-            err_theta_real.append((theta_pred_real - theta_true)**2)
-            t_real.append(t1 - t0)
+            errors["Real-CNN"]["r"].append((r_pred - r_true)**2)
+            errors["Real-CNN"]["theta"].append((theta_pred - theta_true)**2)
+            errors["Real-CNN"]["time"].append(t1 - t0)
             
             # --- 3. 测试 MUSIC ---
-            # 恢复复数矩阵
-            R_complex = R[0] + 1j * R[1]
-            
             t0 = time.time()
-            r_pred_music, theta_pred_music = music_2d(R_complex, r_grid, theta_grid)
+            r_pred, theta_pred = music_2d(R_complex, r_grid, theta_grid)
             t1 = time.time()
+            errors["MUSIC"]["r"].append((r_pred - r_true)**2)
+            errors["MUSIC"]["theta"].append((theta_pred - theta_true)**2)
+            errors["MUSIC"]["time"].append(t1 - t0)
             
-            err_r_music.append((r_pred_music - r_true)**2)
-            err_theta_music.append((theta_pred_music - theta_true)**2)
-            t_music.append(t1 - t0)
+            # --- 4. 测试 ESPRIT ---
+            t0 = time.time()
+            r_pred, theta_pred = esprit_2d(R_complex, cfg.M, cfg.N)
+            t1 = time.time()
+            errors["ESPRIT"]["r"].append((r_pred - r_true)**2)
+            errors["ESPRIT"]["theta"].append((theta_pred - theta_true)**2)
+            errors["ESPRIT"]["time"].append(t1 - t0)
             
-        # 计算 RMSE
-        rmse_r_cvnn = np.sqrt(np.mean(err_r_cvnn))
-        rmse_r_real = np.sqrt(np.mean(err_r_real))
-        rmse_r_music = np.sqrt(np.mean(err_r_music))
+            # --- 5. 测试 OMP ---
+            t0 = time.time()
+            r_pred, theta_pred = omp_2d(R_complex, r_grid_omp, theta_grid_omp)
+            t1 = time.time()
+            errors["OMP"]["r"].append((r_pred - r_true)**2)
+            errors["OMP"]["theta"].append((theta_pred - theta_true)**2)
+            errors["OMP"]["time"].append(t1 - t0)
+            
+            # --- 6. 测试 RAM ---
+            t0 = time.time()
+            r_pred, theta_pred = ram_fda(R_complex, r_grid, theta_grid, max_iter=5)
+            t1 = time.time()
+            errors["RAM"]["r"].append((r_pred - r_true)**2)
+            errors["RAM"]["theta"].append((theta_pred - theta_true)**2)
+            errors["RAM"]["time"].append(t1 - t0)
         
-        rmse_theta_cvnn = np.sqrt(np.mean(err_theta_cvnn))
-        rmse_theta_real = np.sqrt(np.mean(err_theta_real))
-        rmse_theta_music = np.sqrt(np.mean(err_theta_music))
+        # 计算并存储 RMSE
+        for m in methods:
+            rmse_r = np.sqrt(np.mean(errors[m]["r"]))
+            rmse_theta = np.sqrt(np.mean(errors[m]["theta"]))
+            avg_time = np.mean(errors[m]["time"])
+            
+            results[m]["rmse_r"].append(rmse_r)
+            results[m]["rmse_theta"].append(rmse_theta)
+            results[m]["time"].append(avg_time)
         
-        results["CVNN"]["rmse_r"].append(rmse_r_cvnn)
-        results["Real-CNN"]["rmse_r"].append(rmse_r_real)
-        results["MUSIC"]["rmse_r"].append(rmse_r_music)
-        
-        results["CVNN"]["rmse_theta"].append(rmse_theta_cvnn)
-        results["Real-CNN"]["rmse_theta"].append(rmse_theta_real)
-        results["MUSIC"]["rmse_theta"].append(rmse_theta_music)
-        
-        results["CVNN"]["time"].append(np.mean(t_cvnn))
-        results["Real-CNN"]["time"].append(np.mean(t_real))
-        results["MUSIC"]["time"].append(np.mean(t_music))
-        
-        print(f"  CVNN     RMSE_r: {rmse_r_cvnn:6.2f}m | RMSE_θ: {rmse_theta_cvnn:5.2f}° | Time: {np.mean(t_cvnn)*1000:.2f}ms")
-        print(f"  Real-CNN RMSE_r: {rmse_r_real:6.2f}m | RMSE_θ: {rmse_theta_real:5.2f}° | Time: {np.mean(t_real)*1000:.2f}ms")
-        print(f"  MUSIC    RMSE_r: {rmse_r_music:6.2f}m | RMSE_θ: {rmse_theta_music:5.2f}° | Time: {np.mean(t_music)*1000:.2f}ms")
+        # 打印结果
+        print(f"  {'Method':<10} {'RMSE_r (m)':>12} {'RMSE_θ (°)':>12} {'Time (ms)':>12}")
+        print(f"  {'-'*48}")
+        for m in methods:
+            rmse_r = results[m]["rmse_r"][-1]
+            rmse_theta = results[m]["rmse_theta"][-1]
+            avg_time = results[m]["time"][-1] * 1000
+            print(f"  {m:<10} {rmse_r:>12.2f} {rmse_theta:>12.2f} {avg_time:>12.2f}")
 
     return snr_list, results
 
 # ==========================================
-# 3. 绘图
+# 6. 绘图
 # ==========================================
 def plot_results(snr_list, results):
     try:
@@ -223,87 +450,90 @@ def plot_results(snr_list, results):
         plt.style.use('seaborn-v0_8-whitegrid')
     except:
         pass
-        
-    plt.figure(figsize=(16, 10))
+    
+    methods = list(results.keys())
+    colors = ['b', 'g', 'r', 'c', 'm', 'orange']
+    markers = ['o', '^', 's', 'd', 'v', 'p']
+    
+    plt.figure(figsize=(18, 12))
     
     # 图1: 距离精度对比
     plt.subplot(2, 2, 1)
-    plt.plot(snr_list, results["CVNN"]["rmse_r"], 'b-o', label='Proposed CVNN', linewidth=2)
-    plt.plot(snr_list, results["Real-CNN"]["rmse_r"], 'g--^', label='Real-CNN', linewidth=2)
-    plt.plot(snr_list, results["MUSIC"]["rmse_r"], 'r--s', label='2D-MUSIC', linewidth=2)
+    for i, m in enumerate(methods):
+        plt.plot(snr_list, results[m]["rmse_r"], 
+                 color=colors[i], marker=markers[i], 
+                 label=m, linewidth=2, markersize=8)
     plt.xlabel('SNR (dB)', fontsize=12)
     plt.ylabel('RMSE Range (m)', fontsize=12)
     plt.title('Range Estimation Accuracy vs. SNR', fontsize=14)
     plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=10)
+    plt.legend(fontsize=9, loc='upper right')
     
     # 图2: 角度精度对比
     plt.subplot(2, 2, 2)
-    plt.plot(snr_list, results["CVNN"]["rmse_theta"], 'b-o', label='Proposed CVNN', linewidth=2)
-    plt.plot(snr_list, results["Real-CNN"]["rmse_theta"], 'g--^', label='Real-CNN', linewidth=2)
-    plt.plot(snr_list, results["MUSIC"]["rmse_theta"], 'r--s', label='2D-MUSIC', linewidth=2)
+    for i, m in enumerate(methods):
+        plt.plot(snr_list, results[m]["rmse_theta"], 
+                 color=colors[i], marker=markers[i], 
+                 label=m, linewidth=2, markersize=8)
     plt.xlabel('SNR (dB)', fontsize=12)
     plt.ylabel('RMSE Angle (°)', fontsize=12)
     plt.title('Angle Estimation Accuracy vs. SNR', fontsize=14)
     plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=10)
+    plt.legend(fontsize=9, loc='upper right')
     
     # 图3: 耗时对比 (对数坐标)
     plt.subplot(2, 2, 3)
-    t_cvnn = [t * 1000 for t in results["CVNN"]["time"]]
-    t_real = [t * 1000 for t in results["Real-CNN"]["time"]]
-    t_music = [t * 1000 for t in results["MUSIC"]["time"]]
-    
-    plt.plot(snr_list, t_cvnn, 'b-o', label='Proposed CVNN', linewidth=2)
-    plt.plot(snr_list, t_real, 'g--^', label='Real-CNN', linewidth=2)
-    plt.plot(snr_list, t_music, 'r--s', label='2D-MUSIC', linewidth=2)
+    for i, m in enumerate(methods):
+        t_ms = [t * 1000 for t in results[m]["time"]]
+        plt.plot(snr_list, t_ms, 
+                 color=colors[i], marker=markers[i], 
+                 label=m, linewidth=2, markersize=8)
     plt.xlabel('SNR (dB)', fontsize=12)
     plt.ylabel('Inference Time (ms)', fontsize=12)
     plt.title('Computation Efficiency (Log Scale)', fontsize=14)
     plt.yscale('log')
     plt.grid(True, alpha=0.3, which="both")
-    plt.legend(fontsize=10)
+    plt.legend(fontsize=9, loc='upper right')
     
     # 图4: 综合表格
     plt.subplot(2, 2, 4)
     plt.axis('off')
     
-    # 计算平均值
-    avg_r_cvnn = np.mean(results["CVNN"]["rmse_r"])
-    avg_r_real = np.mean(results["Real-CNN"]["rmse_r"])
-    avg_r_music = np.mean(results["MUSIC"]["rmse_r"])
-    
-    avg_theta_cvnn = np.mean(results["CVNN"]["rmse_theta"])
-    avg_theta_real = np.mean(results["Real-CNN"]["rmse_theta"])
-    avg_theta_music = np.mean(results["MUSIC"]["rmse_theta"])
-    
-    avg_t_cvnn = np.mean(results["CVNN"]["time"]) * 1000
-    avg_t_real = np.mean(results["Real-CNN"]["time"]) * 1000
-    avg_t_music = np.mean(results["MUSIC"]["time"]) * 1000
-    
-    table_data = [
-        ['Method', 'Avg RMSE_r (m)', 'Avg RMSE_θ (°)', 'Avg Time (ms)'],
-        ['CVNN', f'{avg_r_cvnn:.2f}', f'{avg_theta_cvnn:.2f}', f'{avg_t_cvnn:.2f}'],
-        ['Real-CNN', f'{avg_r_real:.2f}', f'{avg_theta_real:.2f}', f'{avg_t_real:.2f}'],
-        ['2D-MUSIC', f'{avg_r_music:.2f}', f'{avg_theta_music:.2f}', f'{avg_t_music:.2f}'],
-    ]
+    # 构造表格数据
+    table_data = [['Method', 'Avg RMSE_r (m)', 'Avg RMSE_θ (°)', 'Avg Time (ms)']]
+    for m in methods:
+        avg_r = np.mean(results[m]["rmse_r"])
+        avg_theta = np.mean(results[m]["rmse_theta"])
+        avg_t = np.mean(results[m]["time"]) * 1000
+        table_data.append([m, f'{avg_r:.2f}', f'{avg_theta:.2f}', f'{avg_t:.2f}'])
     
     table = plt.table(cellText=table_data, loc='center', cellLoc='center',
-                      colWidths=[0.25, 0.25, 0.25, 0.25])
+                      colWidths=[0.22, 0.22, 0.22, 0.22])
     table.auto_set_font_size(False)
-    table.set_fontsize(11)
-    table.scale(1.2, 1.8)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.6)
     
     # 设置表头样式
     for i in range(4):
         table[(0, i)].set_facecolor('#4472C4')
         table[(0, i)].set_text_props(color='white', fontweight='bold')
     
-    plt.title('Average Performance Summary', fontsize=14, pad=20)
+    # 高亮最佳结果
+    # 找出最佳 (最小) RMSE_r 和 RMSE_theta
+    best_r_idx = np.argmin([np.mean(results[m]["rmse_r"]) for m in methods]) + 1
+    best_theta_idx = np.argmin([np.mean(results[m]["rmse_theta"]) for m in methods]) + 1
+    best_time_idx = np.argmin([np.mean(results[m]["time"]) for m in methods]) + 1
+    
+    table[(best_r_idx, 1)].set_facecolor('#90EE90')
+    table[(best_theta_idx, 2)].set_facecolor('#90EE90')
+    table[(best_time_idx, 3)].set_facecolor('#90EE90')
+    
+    plt.title('Average Performance Summary (Green = Best)', fontsize=14, pad=20)
     
     plt.tight_layout()
     plt.savefig('benchmark_comparison.png', dpi=300, bbox_inches='tight')
     print("\n图表已保存至 benchmark_comparison.png")
+
 
 if __name__ == "__main__":
     snr_list, results = run_benchmark()
