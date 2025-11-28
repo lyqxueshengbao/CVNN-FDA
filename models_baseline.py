@@ -49,19 +49,19 @@ class RealCNN(nn.Module):
         # Block 1
         x = self.conv1(x)
         x = self.bn1(x)
-        x = F.relu(x)
+        x = F.leaky_relu(x, negative_slope=0.2)
         x = self.pool1(x)
         
         # Block 2
         x = self.conv2(x)
         x = self.bn2(x)
-        x = F.relu(x)
+        x = F.leaky_relu(x, negative_slope=0.2)
         x = self.pool2(x)
         
         # Block 3
         x = self.conv3(x)
         x = self.bn3(x)
-        x = F.relu(x)
+        x = F.leaky_relu(x, negative_slope=0.2)
         x = self.pool3(x)
         
         # 展平
