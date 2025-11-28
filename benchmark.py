@@ -7,6 +7,7 @@ FDA-MIMO 雷达参数估计对比实验脚本
 4. ESPRIT (旋转不变子空间法)
 5. OMP (正交匹配追踪)
 6. RAM (降维交替最小化，FDA专用)
++ CRB (克拉美-罗界，理论下界)
 """
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,6 +20,156 @@ import config as cfg
 from model import FDA_CVNN
 from models_baseline import RealCNN
 from utils_physics import generate_covariance_matrix, get_steering_vector
+
+
+# ==========================================
+# 0. 克拉美-罗界 (CRB) 计算
+# ==========================================
+def compute_crb(snr_db, L=None, M=None, N=None):
+    """
+    计算 FDA-MIMO 系统的克拉美-罗界 (Cramér-Rao Bound)
+    
+    对于距离和角度联合估计，CRB 给出了无偏估计器方差的理论下界
+    
+    参数:
+        snr_db: 信噪比 (dB)
+        L: 快拍数
+        M: 发射阵元数
+        N: 接收阵元数
+    
+    返回:
+        crb_r: 距离估计的 CRB (标准差, 米)
+        crb_theta: 角度估计的 CRB (标准差, 度)
+    """
+    L = L or cfg.L_snapshots
+    M = M or cfg.M
+    N = N or cfg.N
+    
+    # 转换 SNR 到线性
+    snr_linear = 10 ** (snr_db / 10.0)
+    
+    # 物理参数
+    c = cfg.c
+    delta_f = cfg.delta_f
+    d = cfg.d
+    wavelength = cfg.wavelength
+    f0 = cfg.f0
+    
+    # FDA-MIMO Fisher 信息矩阵 (FIM) 的近似计算
+    # 参考: "FDA Radar Signal Processing" 相关文献
+    
+    # 对于均匀线阵，角度估计的 CRB:
+    # var(theta) >= 6 / (L * SNR * (2*pi*d/lambda)^2 * N * (N^2 - 1))
+    # 
+    # 对于 FDA，距离估计的 CRB:
+    # var(r) >= c^2 / (L * SNR * (4*pi*delta_f)^2 * M * (M^2 - 1) / 12)
+    
+    # 角度 CRB (基于接收阵列)
+    # 标准 ULA 角度估计 CRB
+    factor_theta = (2 * np.pi * d / wavelength) ** 2
+    # 对于 N 元 ULA: var >= 6 / (L * SNR * factor * N * (N^2-1))
+    # 简化形式，假设角度在 broadside 附近
+    var_sin_theta = 6.0 / (L * snr_linear * factor_theta * N * (N**2 - 1) / 12)
+    # 转换为角度方差 (小角度近似: d(theta) ≈ d(sin(theta)) / cos(theta))
+    # 在 broadside (theta=0) 时 cos(theta)=1
+    var_theta_rad = var_sin_theta  # 近似
+    crb_theta_deg = np.sqrt(var_theta_rad) * 180 / np.pi
+    
+    # 距离 CRB (基于 FDA 频率增量)
+    # FDA 的距离分辨能力来自频率增量 delta_f
+    # var(r) >= c^2 / (L * SNR * (4*pi*delta_f/c)^2 * M * (M^2-1) / 12)
+    factor_r = (4 * np.pi * delta_f / c) ** 2
+    var_r = 1.0 / (L * snr_linear * factor_r * M * (M**2 - 1) / 12)
+    crb_r = np.sqrt(var_r)
+    
+    # 联合估计会有耦合，但作为下界参考，这是合理的近似
+    # 实际 CRB 需要计算完整的 FIM 并求逆
+    
+    return crb_r, crb_theta_deg
+
+
+def compute_crb_full(snr_db, r_true, theta_true, L=None):
+    """
+    计算完整的 Fisher 信息矩阵 (FIM) 并求逆得到 CRB
+    这是更精确的计算方法
+    
+    参数:
+        snr_db: 信噪比 (dB)
+        r_true: 真实距离 (米)
+        theta_true: 真实角度 (度)
+        L: 快拍数
+    
+    返回:
+        crb_r: 距离估计的 CRB 标准差 (米)
+        crb_theta: 角度估计的 CRB 标准差 (度)
+    """
+    L = L or cfg.L_snapshots
+    M = cfg.M
+    N = cfg.N
+    MN = M * N
+    
+    snr_linear = 10 ** (snr_db / 10.0)
+    sigma2 = 1.0 / snr_linear  # 噪声方差 (信号功率归一化为1)
+    
+    c = cfg.c
+    delta_f = cfg.delta_f
+    d = cfg.d
+    wavelength = cfg.wavelength
+    
+    theta_rad = np.deg2rad(theta_true)
+    
+    # 构造导向矢量 a(r, theta) 及其导数
+    m = np.arange(M)
+    n = np.arange(N)
+    
+    # 发射导向矢量相位
+    phi_tx = -4 * np.pi * delta_f * m * r_true / c + 2 * np.pi * d * m * np.sin(theta_rad) / wavelength
+    a_tx = np.exp(1j * phi_tx)
+    
+    # 接收导向矢量相位  
+    phi_rx = 2 * np.pi * d * n * np.sin(theta_rad) / wavelength
+    a_rx = np.exp(1j * phi_rx)
+    
+    # 联合导向矢量 (Kronecker 积)
+    a = np.kron(a_tx, a_rx)  # [MN,]
+    
+    # 对 r 的导数
+    dphi_tx_dr = -4 * np.pi * delta_f * m / c
+    da_tx_dr = 1j * dphi_tx_dr * a_tx
+    da_dr = np.kron(da_tx_dr, a_rx)
+    
+    # 对 theta 的导数
+    cos_theta = np.cos(theta_rad)
+    dphi_tx_dtheta = 2 * np.pi * d * m * cos_theta / wavelength
+    dphi_rx_dtheta = 2 * np.pi * d * n * cos_theta / wavelength
+    
+    da_tx_dtheta = 1j * dphi_tx_dtheta * a_tx
+    da_rx_dtheta = 1j * dphi_rx_dtheta * a_rx
+    
+    # 链式法则
+    da_dtheta = np.kron(da_tx_dtheta, a_rx) + np.kron(a_tx, da_rx_dtheta)
+    
+    # Fisher 信息矩阵 (2x2)
+    # FIM[i,j] = 2*L*Re{(da/dθ_i)^H * R^{-1} * (da/dθ_j)} / sigma^2
+    # 对于单目标高 SNR 近似: R ≈ sigma^2 * I
+    # FIM[i,j] ≈ 2*L*SNR * Re{(da/dθ_i)^H * (da/dθ_j)}
+    
+    D = np.column_stack([da_dr, da_dtheta * np.pi / 180])  # 转换为弧度
+    
+    # FIM = 2 * L * SNR * Re{D^H @ D}
+    FIM = 2 * L * snr_linear * np.real(D.conj().T @ D)
+    
+    # CRB = FIM^{-1}
+    try:
+        CRB = np.linalg.inv(FIM)
+        crb_r = np.sqrt(CRB[0, 0])
+        crb_theta = np.sqrt(CRB[1, 1])  # 已经是度
+    except:
+        crb_r = np.inf
+        crb_theta = np.inf
+    
+    return crb_r, crb_theta
+
 
 # ==========================================
 # 1. 2D-MUSIC 算法实现
@@ -338,6 +489,8 @@ def run_benchmark():
     # 结果存储 (同时记录距离和角度)
     methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP", "RAM"]
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
+    # 添加 CRB 作为理论下界
+    results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
     
     # 搜索网格
     r_grid = np.linspace(0, 2000, 200)    # 10m 步长
@@ -430,6 +583,12 @@ def run_benchmark():
             results[m]["rmse_theta"].append(rmse_theta)
             results[m]["time"].append(avg_time)
         
+        # 计算 CRB (使用中间值作为参考点)
+        crb_r, crb_theta = compute_crb(snr, L=cfg.L_snapshots)
+        results["CRB"]["rmse_r"].append(crb_r)
+        results["CRB"]["rmse_theta"].append(crb_theta)
+        results["CRB"]["time"].append(0)  # CRB 不是算法，无计算时间
+        
         # 打印结果
         print(f"  {'Method':<10} {'RMSE_r (m)':>12} {'RMSE_θ (°)':>12} {'Time (ms)':>12}")
         print(f"  {'-'*48}")
@@ -438,6 +597,8 @@ def run_benchmark():
             rmse_theta = results[m]["rmse_theta"][-1]
             avg_time = results[m]["time"][-1] * 1000
             print(f"  {m:<10} {rmse_r:>12.2f} {rmse_theta:>12.2f} {avg_time:>12.2f}")
+        # 打印 CRB
+        print(f"  {'CRB':<10} {crb_r:>12.2f} {crb_theta:>12.2f} {'(bound)':>12}")
 
     return snr_list, results
 
@@ -451,37 +612,46 @@ def plot_results(snr_list, results):
     except:
         pass
     
-    methods = list(results.keys())
+    # 分离算法和 CRB
+    methods = [m for m in results.keys() if m != "CRB"]
     colors = ['b', 'g', 'r', 'c', 'm', 'orange']
     markers = ['o', '^', 's', 'd', 'v', 'p']
     
     plt.figure(figsize=(18, 12))
     
-    # 图1: 距离精度对比
+    # 图1: 距离精度对比 (含 CRB)
     plt.subplot(2, 2, 1)
     for i, m in enumerate(methods):
         plt.plot(snr_list, results[m]["rmse_r"], 
                  color=colors[i], marker=markers[i], 
                  label=m, linewidth=2, markersize=8)
+    # 绘制 CRB (虚线，黑色)
+    plt.plot(snr_list, results["CRB"]["rmse_r"], 
+             'k--', label='CRB', linewidth=2.5)
     plt.xlabel('SNR (dB)', fontsize=12)
     plt.ylabel('RMSE Range (m)', fontsize=12)
     plt.title('Range Estimation Accuracy vs. SNR', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=9, loc='upper right')
+    plt.yscale('log')  # 用对数坐标更好展示 CRB
     
-    # 图2: 角度精度对比
+    # 图2: 角度精度对比 (含 CRB)
     plt.subplot(2, 2, 2)
     for i, m in enumerate(methods):
         plt.plot(snr_list, results[m]["rmse_theta"], 
                  color=colors[i], marker=markers[i], 
                  label=m, linewidth=2, markersize=8)
+    # 绘制 CRB
+    plt.plot(snr_list, results["CRB"]["rmse_theta"], 
+             'k--', label='CRB', linewidth=2.5)
     plt.xlabel('SNR (dB)', fontsize=12)
     plt.ylabel('RMSE Angle (°)', fontsize=12)
     plt.title('Angle Estimation Accuracy vs. SNR', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=9, loc='upper right')
+    plt.yscale('log')
     
-    # 图3: 耗时对比 (对数坐标)
+    # 图3: 耗时对比 (对数坐标，不含 CRB)
     plt.subplot(2, 2, 3)
     for i, m in enumerate(methods):
         t_ms = [t * 1000 for t in results[m]["time"]]
@@ -495,31 +665,39 @@ def plot_results(snr_list, results):
     plt.grid(True, alpha=0.3, which="both")
     plt.legend(fontsize=9, loc='upper right')
     
-    # 图4: 综合表格
+    # 图4: 综合表格 (含 CRB)
     plt.subplot(2, 2, 4)
     plt.axis('off')
     
     # 构造表格数据
+    all_methods = methods + ["CRB"]
     table_data = [['Method', 'Avg RMSE_r (m)', 'Avg RMSE_θ (°)', 'Avg Time (ms)']]
-    for m in methods:
+    for m in all_methods:
         avg_r = np.mean(results[m]["rmse_r"])
         avg_theta = np.mean(results[m]["rmse_theta"])
-        avg_t = np.mean(results[m]["time"]) * 1000
-        table_data.append([m, f'{avg_r:.2f}', f'{avg_theta:.2f}', f'{avg_t:.2f}'])
+        if m == "CRB":
+            table_data.append([m, f'{avg_r:.4f}', f'{avg_theta:.4f}', '(bound)'])
+        else:
+            avg_t = np.mean(results[m]["time"]) * 1000
+            table_data.append([m, f'{avg_r:.2f}', f'{avg_theta:.2f}', f'{avg_t:.2f}'])
     
     table = plt.table(cellText=table_data, loc='center', cellLoc='center',
                       colWidths=[0.22, 0.22, 0.22, 0.22])
     table.auto_set_font_size(False)
     table.set_fontsize(10)
-    table.scale(1.2, 1.6)
+    table.scale(1.2, 1.5)
     
     # 设置表头样式
     for i in range(4):
         table[(0, i)].set_facecolor('#4472C4')
         table[(0, i)].set_text_props(color='white', fontweight='bold')
     
-    # 高亮最佳结果
-    # 找出最佳 (最小) RMSE_r 和 RMSE_theta
+    # CRB 行用灰色背景
+    crb_row = len(all_methods)
+    for i in range(4):
+        table[(crb_row, i)].set_facecolor('#E0E0E0')
+    
+    # 高亮最佳算法结果 (不含 CRB)
     best_r_idx = np.argmin([np.mean(results[m]["rmse_r"]) for m in methods]) + 1
     best_theta_idx = np.argmin([np.mean(results[m]["rmse_theta"]) for m in methods]) + 1
     best_time_idx = np.argmin([np.mean(results[m]["time"]) for m in methods]) + 1
@@ -528,7 +706,7 @@ def plot_results(snr_list, results):
     table[(best_theta_idx, 2)].set_facecolor('#90EE90')
     table[(best_time_idx, 3)].set_facecolor('#90EE90')
     
-    plt.title('Average Performance Summary (Green = Best)', fontsize=14, pad=20)
+    plt.title('Average Performance Summary (Green = Best, Gray = CRB)', fontsize=14, pad=20)
     
     plt.tight_layout()
     plt.savefig('benchmark_comparison.png', dpi=300, bbox_inches='tight')
