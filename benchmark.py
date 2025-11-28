@@ -119,10 +119,10 @@ def run_benchmark():
         "Real-CNN": {"rmse_r": [], "time": []}
     }
     
-    # MUSIC 搜索网格 (降低精度以加快速度)
-    # 真实应用中 MUSIC 需要更细的网格，速度会更慢
-    r_grid = np.linspace(0, 2000, 50)   # 40m 步长
-    theta_grid = np.linspace(-60, 60, 30) # 4度 步长
+    # MUSIC 搜索网格 (加密以提高精度)
+    # 注意：网格越细，MUSIC 越慢，但精度越高
+    r_grid = np.linspace(0, 2000, 200)    # 10m 步长 (原来40m)
+    theta_grid = np.linspace(-60, 60, 60) # 2度 步长 (原来4度)
     
     print(f"\n开始对比实验 (样本数={num_samples})...")
     print(f"MUSIC 网格大小: {len(r_grid)}x{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点")
