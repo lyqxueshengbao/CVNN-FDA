@@ -112,11 +112,11 @@ def run_benchmark():
     snr_list = [-10, 0, 10, 20, 30]
     num_samples = 50  # 每个SNR测试样本数 (MUSIC太慢，设小一点)
     
-    # 结果存储
+    # 结果存储 (同时记录距离和角度)
     results = {
-        "CVNN": {"rmse_r": [], "time": []},
-        "MUSIC": {"rmse_r": [], "time": []},
-        "Real-CNN": {"rmse_r": [], "time": []}
+        "CVNN": {"rmse_r": [], "rmse_theta": [], "time": []},
+        "MUSIC": {"rmse_r": [], "rmse_theta": [], "time": []},
+        "Real-CNN": {"rmse_r": [], "rmse_theta": [], "time": []}
     }
     
     # MUSIC 搜索网格 (加密以提高精度)
@@ -130,9 +130,15 @@ def run_benchmark():
     for snr in snr_list:
         print(f"\n正在测试 SNR = {snr} dB ...")
         
-        err_cvnn = []
-        err_music = []
-        err_real = []
+        # 距离误差
+        err_r_cvnn = []
+        err_r_music = []
+        err_r_real = []
+        
+        # 角度误差
+        err_theta_cvnn = []
+        err_theta_music = []
+        err_theta_real = []
         
         t_cvnn = []
         t_music = []
@@ -150,9 +156,11 @@ def run_benchmark():
             with torch.no_grad():
                 pred = cvnn(R_tensor).cpu().numpy()[0]
             r_pred_cvnn = pred[0] * 2000
+            theta_pred_cvnn = pred[1] * 120 - 60  # 反归一化: [0,1] -> [-60, 60]
             t1 = time.time()
             
-            err_cvnn.append((r_pred_cvnn - r_true)**2)
+            err_r_cvnn.append((r_pred_cvnn - r_true)**2)
+            err_theta_cvnn.append((theta_pred_cvnn - theta_true)**2)
             t_cvnn.append(t1 - t0)
             
             # --- 2. 测试 Real-CNN ---
@@ -160,9 +168,11 @@ def run_benchmark():
             with torch.no_grad():
                 pred_real = real_cnn(R_tensor).cpu().numpy()[0]
             r_pred_real = pred_real[0] * 2000
+            theta_pred_real = pred_real[1] * 120 - 60
             t1 = time.time()
             
-            err_real.append((r_pred_real - r_true)**2)
+            err_r_real.append((r_pred_real - r_true)**2)
+            err_theta_real.append((theta_pred_real - theta_true)**2)
             t_real.append(t1 - t0)
             
             # --- 3. 测试 MUSIC ---
@@ -170,28 +180,37 @@ def run_benchmark():
             R_complex = R[0] + 1j * R[1]
             
             t0 = time.time()
-            r_pred_music, _ = music_2d(R_complex, r_grid, theta_grid)
+            r_pred_music, theta_pred_music = music_2d(R_complex, r_grid, theta_grid)
             t1 = time.time()
             
-            err_music.append((r_pred_music - r_true)**2)
+            err_r_music.append((r_pred_music - r_true)**2)
+            err_theta_music.append((theta_pred_music - theta_true)**2)
             t_music.append(t1 - t0)
             
         # 计算 RMSE
-        rmse_cvnn = np.sqrt(np.mean(err_cvnn))
-        rmse_real = np.sqrt(np.mean(err_real))
-        rmse_music = np.sqrt(np.mean(err_music))
+        rmse_r_cvnn = np.sqrt(np.mean(err_r_cvnn))
+        rmse_r_real = np.sqrt(np.mean(err_r_real))
+        rmse_r_music = np.sqrt(np.mean(err_r_music))
         
-        results["CVNN"]["rmse_r"].append(rmse_cvnn)
-        results["Real-CNN"]["rmse_r"].append(rmse_real)
-        results["MUSIC"]["rmse_r"].append(rmse_music)
+        rmse_theta_cvnn = np.sqrt(np.mean(err_theta_cvnn))
+        rmse_theta_real = np.sqrt(np.mean(err_theta_real))
+        rmse_theta_music = np.sqrt(np.mean(err_theta_music))
+        
+        results["CVNN"]["rmse_r"].append(rmse_r_cvnn)
+        results["Real-CNN"]["rmse_r"].append(rmse_r_real)
+        results["MUSIC"]["rmse_r"].append(rmse_r_music)
+        
+        results["CVNN"]["rmse_theta"].append(rmse_theta_cvnn)
+        results["Real-CNN"]["rmse_theta"].append(rmse_theta_real)
+        results["MUSIC"]["rmse_theta"].append(rmse_theta_music)
         
         results["CVNN"]["time"].append(np.mean(t_cvnn))
         results["Real-CNN"]["time"].append(np.mean(t_real))
         results["MUSIC"]["time"].append(np.mean(t_music))
         
-        print(f"  CVNN     RMSE: {rmse_cvnn:.2f}m | Time: {np.mean(t_cvnn)*1000:.2f}ms")
-        print(f"  Real-CNN RMSE: {rmse_real:.2f}m | Time: {np.mean(t_real)*1000:.2f}ms")
-        print(f"  MUSIC    RMSE: {rmse_music:.2f}m | Time: {np.mean(t_music)*1000:.2f}ms")
+        print(f"  CVNN     RMSE_r: {rmse_r_cvnn:6.2f}m | RMSE_θ: {rmse_theta_cvnn:5.2f}° | Time: {np.mean(t_cvnn)*1000:.2f}ms")
+        print(f"  Real-CNN RMSE_r: {rmse_r_real:6.2f}m | RMSE_θ: {rmse_theta_real:5.2f}° | Time: {np.mean(t_real)*1000:.2f}ms")
+        print(f"  MUSIC    RMSE_r: {rmse_r_music:6.2f}m | RMSE_θ: {rmse_theta_music:5.2f}° | Time: {np.mean(t_music)*1000:.2f}ms")
 
     return snr_list, results
 
@@ -205,10 +224,10 @@ def plot_results(snr_list, results):
     except:
         pass
         
-    plt.figure(figsize=(14, 6))
+    plt.figure(figsize=(16, 10))
     
-    # 图1: 精度对比
-    plt.subplot(1, 2, 1)
+    # 图1: 距离精度对比
+    plt.subplot(2, 2, 1)
     plt.plot(snr_list, results["CVNN"]["rmse_r"], 'b-o', label='Proposed CVNN', linewidth=2)
     plt.plot(snr_list, results["Real-CNN"]["rmse_r"], 'g--^', label='Real-CNN', linewidth=2)
     plt.plot(snr_list, results["MUSIC"]["rmse_r"], 'r--s', label='2D-MUSIC', linewidth=2)
@@ -218,27 +237,73 @@ def plot_results(snr_list, results):
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=10)
     
-    # 图2: 耗时对比 (对数坐标)
-    plt.subplot(1, 2, 2)
-    # 转换为毫秒
+    # 图2: 角度精度对比
+    plt.subplot(2, 2, 2)
+    plt.plot(snr_list, results["CVNN"]["rmse_theta"], 'b-o', label='Proposed CVNN', linewidth=2)
+    plt.plot(snr_list, results["Real-CNN"]["rmse_theta"], 'g--^', label='Real-CNN', linewidth=2)
+    plt.plot(snr_list, results["MUSIC"]["rmse_theta"], 'r--s', label='2D-MUSIC', linewidth=2)
+    plt.xlabel('SNR (dB)', fontsize=12)
+    plt.ylabel('RMSE Angle (°)', fontsize=12)
+    plt.title('Angle Estimation Accuracy vs. SNR', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=10)
+    
+    # 图3: 耗时对比 (对数坐标)
+    plt.subplot(2, 2, 3)
     t_cvnn = [t * 1000 for t in results["CVNN"]["time"]]
     t_real = [t * 1000 for t in results["Real-CNN"]["time"]]
     t_music = [t * 1000 for t in results["MUSIC"]["time"]]
     
-    plt.plot(snr_list, t_cvnn, 'b-o', label='Proposed CVNN')
-    plt.plot(snr_list, t_real, 'g--^', label='Real-CNN')
-    plt.plot(snr_list, t_music, 'r--s', label='2D-MUSIC')
+    plt.plot(snr_list, t_cvnn, 'b-o', label='Proposed CVNN', linewidth=2)
+    plt.plot(snr_list, t_real, 'g--^', label='Real-CNN', linewidth=2)
+    plt.plot(snr_list, t_music, 'r--s', label='2D-MUSIC', linewidth=2)
     plt.xlabel('SNR (dB)', fontsize=12)
     plt.ylabel('Inference Time (ms)', fontsize=12)
     plt.title('Computation Efficiency (Log Scale)', fontsize=14)
-    plt.yscale('log') # 关键：用对数坐标展示巨大的速度差异
+    plt.yscale('log')
     plt.grid(True, alpha=0.3, which="both")
     plt.legend(fontsize=10)
     
+    # 图4: 综合表格
+    plt.subplot(2, 2, 4)
+    plt.axis('off')
+    
+    # 计算平均值
+    avg_r_cvnn = np.mean(results["CVNN"]["rmse_r"])
+    avg_r_real = np.mean(results["Real-CNN"]["rmse_r"])
+    avg_r_music = np.mean(results["MUSIC"]["rmse_r"])
+    
+    avg_theta_cvnn = np.mean(results["CVNN"]["rmse_theta"])
+    avg_theta_real = np.mean(results["Real-CNN"]["rmse_theta"])
+    avg_theta_music = np.mean(results["MUSIC"]["rmse_theta"])
+    
+    avg_t_cvnn = np.mean(results["CVNN"]["time"]) * 1000
+    avg_t_real = np.mean(results["Real-CNN"]["time"]) * 1000
+    avg_t_music = np.mean(results["MUSIC"]["time"]) * 1000
+    
+    table_data = [
+        ['Method', 'Avg RMSE_r (m)', 'Avg RMSE_θ (°)', 'Avg Time (ms)'],
+        ['CVNN', f'{avg_r_cvnn:.2f}', f'{avg_theta_cvnn:.2f}', f'{avg_t_cvnn:.2f}'],
+        ['Real-CNN', f'{avg_r_real:.2f}', f'{avg_theta_real:.2f}', f'{avg_t_real:.2f}'],
+        ['2D-MUSIC', f'{avg_r_music:.2f}', f'{avg_theta_music:.2f}', f'{avg_t_music:.2f}'],
+    ]
+    
+    table = plt.table(cellText=table_data, loc='center', cellLoc='center',
+                      colWidths=[0.25, 0.25, 0.25, 0.25])
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1.2, 1.8)
+    
+    # 设置表头样式
+    for i in range(4):
+        table[(0, i)].set_facecolor('#4472C4')
+        table[(0, i)].set_text_props(color='white', fontweight='bold')
+    
+    plt.title('Average Performance Summary', fontsize=14, pad=20)
+    
     plt.tight_layout()
-    plt.savefig('benchmark_comparison.png', dpi=300)
+    plt.savefig('benchmark_comparison.png', dpi=300, bbox_inches='tight')
     print("\n图表已保存至 benchmark_comparison.png")
-    # plt.show()
 
 if __name__ == "__main__":
     snr_list, results = run_benchmark()
