@@ -468,7 +468,7 @@ def run_benchmark():
     real_cnn.eval()
     
     # 参数设置
-    snr_list = [-10, 0, 10, 20, 30]
+    snr_list = [-5, 0, 5, 10, 15, 20]
     num_samples = 50  # 每个SNR测试样本数 (传统算法较慢)
     
     # 结果存储 (同时记录距离和角度)
