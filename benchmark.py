@@ -1,10 +1,11 @@
 """
-FDA-MIMO 雷达参数估计对比实验脚本 - 最终修正版
+FDA-MIMO 雷达参数估计对比实验 - 终极优化版
 关键改进:
-1. MUSIC 添加两级搜索 (粗搜索 + 局部细化)
-2. ESPRIT 添加相位解模糊
-3. 使用完整 FIM 计算 CRB
-4. OMP 字典归一化
+1. MUSIC: 两级搜索 (粗网格 + 局部细化)
+2. ESPRIT: 相位解模糊
+3. OMP: 归一化字典
+4. RAM: 动态收缩网格 + ESPRIT 初始化 ⭐ 核心优化
+5. CRB: 完整 FIM 计算
 """
 
 import numpy as np
@@ -85,10 +86,8 @@ def compute_crb_full(snr_db, r_true, theta_true, L=None):
     return crb_r, crb_theta
 
 
-def compute_crb_average(snr_db, L=None, num_samples=50):
-    """
-    计算多个随机目标位置的平均 CRB
-    """
+def compute_crb_average(snr_db, L=None, num_samples=30):
+    """计算多个随机目标位置的平均 CRB"""
     crb_r_list = []
     crb_theta_list = []
 
@@ -96,8 +95,9 @@ def compute_crb_average(snr_db, L=None, num_samples=50):
         r_true = np.random.uniform(0, cfg.r_max)
         theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
         crb_r, crb_theta = compute_crb_full(snr_db, r_true, theta_true, L)
-        crb_r_list.append(crb_r)
-        crb_theta_list.append(crb_theta)
+        if np.isfinite(crb_r) and np.isfinite(crb_theta):
+            crb_r_list.append(crb_r)
+            crb_theta_list.append(crb_theta)
 
     return np.mean(crb_r_list), np.mean(crb_theta_list)
 
@@ -109,12 +109,11 @@ def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
     """
     两级 MUSIC 算法
     1. 粗网格搜索
-    2. 局部细化搜索 (可选)
+    2. 局部细化搜索
     """
     # 特征分解
     w, v = np.linalg.eigh(R)
     idx = np.argsort(w)
-    w = w[idx]
     v = v[:, idx]
 
     Un = v[:, :-1]
@@ -124,7 +123,7 @@ def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
         a = get_steering_vector(r, theta)
         proj = Un.conj().T @ a
         denom = np.sum(np.abs(proj)**2)
-        return 1.0 / (denom + 1e-10)
+        return 1.0 / (denom + 1e-12)
 
     # === 第一步：粗搜索 ===
     max_p = -1
@@ -214,22 +213,18 @@ def esprit_2d_robust(R, M, N):
         phase_tx = np.angle(eigenvalue_tx)
 
         # 从发射相位中扣除角度贡献
-        # phase_tx = -4π*Δf*r/c + 2π*d*sin(θ)/λ
         phi_angle = 2 * np.pi * cfg.d * sin_theta / cfg.wavelength
         diff_phase = phase_tx - phi_angle
 
-        # 计算距离 (带解模糊)
+        # 计算距离
         r_est = -diff_phase * cfg.c / (4 * np.pi * cfg.delta_f)
 
         # === 相位解模糊 ===
-        # 无模糊距离
         max_unambiguous_r = cfg.c / (2 * cfg.delta_f)
 
-        # 如果算出负值，加周期
+        # 周期性调整
         while r_est < 0:
             r_est += max_unambiguous_r
-
-        # 如果超出范围，取模
         while r_est > cfg.r_max:
             r_est -= max_unambiguous_r
 
@@ -244,7 +239,7 @@ def esprit_2d_robust(R, M, N):
 
 
 # ==========================================
-# 3. OMP (已归一化)
+# 3. OMP (归一化字典)
 # ==========================================
 def omp_2d(R, r_grid, theta_grid, K=1):
     """
@@ -254,7 +249,7 @@ def omp_2d(R, r_grid, theta_grid, K=1):
 
     w, v = np.linalg.eigh(R)
     y = v[:, -1]
-    y = y / np.linalg.norm(y)
+    y = y / (np.linalg.norm(y) + 1e-12)
 
     num_r = len(r_grid)
     num_theta = len(theta_grid)
@@ -264,7 +259,7 @@ def omp_2d(R, r_grid, theta_grid, K=1):
     for i, r in enumerate(r_grid):
         for j, theta in enumerate(theta_grid):
             a = get_steering_vector(r, theta)
-            A[:, i * num_theta + j] = a / np.linalg.norm(a)
+            A[:, i * num_theta + j] = a / (np.linalg.norm(a) + 1e-12)
 
     residual = y.copy()
     support = []
@@ -286,44 +281,117 @@ def omp_2d(R, r_grid, theta_grid, K=1):
 
 
 # ==========================================
-# 4. RAM (FDA专用)
+# 4. RAM 终极优化版 ⭐
 # ==========================================
-def ram_fda(R, r_grid, theta_grid, max_iter=10):
+def ram_fda_ultimate(R, M, N, max_iter=10, verbose=False):
     """
-    降维交替最小化算法 (用 ESPRIT 初始化)
+    RAM 终极优化版本
+    核心改进:
+    1. ESPRIT 智能初始化
+    2. 动态收缩网格 (Zoom-in Strategy)
+    3. 早停机制 (Convergence Detection)
     """
-    M, N = cfg.M, cfg.N
-
+    # 准备噪声子空间
     w, v = np.linalg.eigh(R)
+    idx = np.argsort(w)
+    v = v[:, idx]
     Un = v[:, :-1]
 
-    def compute_spectrum(r, theta):
+    # 代价函数 (最小化噪声子空间投影)
+    def cost_function(r, theta):
         a = get_steering_vector(r, theta)
         proj = Un.conj().T @ a
-        return 1.0 / (np.sum(np.abs(proj)**2) + 1e-10)
+        return np.sum(np.abs(proj)**2)
 
-    # 用 ESPRIT 快速初始化
-    r_est, theta_est = esprit_2d_robust(R, M, N)
+    # === 初始化: 使用 ESPRIT ===
+    try:
+        r_curr, theta_curr = esprit_2d_robust(R, M, N)
+        if verbose:
+            print(f"  ESPRIT 初始化: r={r_curr:.1f}m, θ={theta_curr:.1f}°")
+    except:
+        # 回退到中心点
+        r_curr = cfg.r_max / 2
+        theta_curr = 0
+        if verbose:
+            print(f"  使用中心点初始化")
 
-    # 交替迭代优化
-    for _ in range(max_iter):
-        # 固定 theta，优化 r
-        max_spectrum = -1
-        for r in r_grid:
-            spectrum = compute_spectrum(r, theta_est)
-            if spectrum > max_spectrum:
-                max_spectrum = spectrum
-                r_est = r
+    # === 交替最小化迭代 ===
+    # 初始搜索范围 (根据系统参数自适应设置)
+    r_search_range = min(200.0, cfg.r_max * 0.2)  # 初始 ±200m 或 ±20%
+    theta_search_range = 10.0  # 初始 ±10°
 
-        # 固定 r，优化 theta
-        max_spectrum = -1
-        for theta in theta_grid:
-            spectrum = compute_spectrum(r_est, theta)
-            if spectrum > max_spectrum:
-                max_spectrum = spectrum
-                theta_est = theta
+    # 收缩因子
+    shrink_factor = 0.6
 
-    return r_est, theta_est
+    # 早停判据
+    tolerance_r = 0.1  # 米
+    tolerance_theta = 0.01  # 度
+
+    for iteration in range(max_iter):
+        prev_r = r_curr
+        prev_theta = theta_curr
+
+        # --- Step 1: 固定 Theta，优化 Range ---
+        r_grid_local = np.linspace(
+            max(0, r_curr - r_search_range),
+            min(cfg.r_max, r_curr + r_search_range),
+            61  # 高密度局部网格
+        )
+
+        best_cost = float('inf')
+        best_r = r_curr
+
+        for r_val in r_grid_local:
+            cost = cost_function(r_val, theta_curr)
+            if cost < best_cost:
+                best_cost = cost
+                best_r = r_val
+
+        r_curr = best_r
+
+        # --- Step 2: 固定 Range，优化 Theta ---
+        theta_grid_local = np.linspace(
+            max(cfg.theta_min, theta_curr - theta_search_range),
+            min(cfg.theta_max, theta_curr + theta_search_range),
+            61
+        )
+
+        best_cost = float('inf')
+        best_theta = theta_curr
+
+        for theta_val in theta_grid_local:
+            cost = cost_function(r_curr, theta_val)
+            if cost < best_cost:
+                best_cost = cost
+                best_theta = theta_val
+
+        theta_curr = best_theta
+
+        # --- 检查收敛 ---
+        delta_r = abs(r_curr - prev_r)
+        delta_theta = abs(theta_curr - prev_theta)
+
+        if verbose:
+            print(f"  Iter {iteration+1}: r={r_curr:.2f}m, θ={theta_curr:.2f}°, "
+                  f"Δr={delta_r:.2f}, Δθ={delta_theta:.3f}")
+
+        # 早停
+        if delta_r < tolerance_r and delta_theta < tolerance_theta:
+            if verbose:
+                print(f"  已收敛，提前终止于第 {iteration+1} 次迭代")
+            break
+
+        # --- 收缩搜索范围 (Zoom-in) ---
+        r_search_range *= shrink_factor
+        theta_search_range *= shrink_factor
+
+        # 防止过度收缩
+        if r_search_range < 1.0:
+            r_search_range = 1.0
+        if theta_search_range < 0.1:
+            theta_search_range = 0.1
+
+    return r_curr, theta_curr
 
 
 # ==========================================
@@ -331,9 +399,9 @@ def ram_fda(R, r_grid, theta_grid, max_iter=10):
 # ==========================================
 def run_benchmark():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
+    print(f"🚀 使用设备: {device}")
 
-    # 加载模型 (保持不变)
+    # 加载模型
     cvnn = FDA_CVNN().to(device)
     cvnn_path = "checkpoints/fda_cvnn_best.pth"
     if os.path.exists(cvnn_path):
@@ -343,14 +411,13 @@ def run_benchmark():
                 cvnn.load_state_dict(checkpoint['model_state_dict'])
             else:
                 cvnn.load_state_dict(checkpoint)
-            print(f"✓ 成功加载 CVNN 权重")
+            print(f"✅ CVNN 模型加载成功")
         except Exception as e:
-            print(f"✗ 加载 CVNN 失败: {e}")
+            print(f"⚠️  CVNN 加载失败: {e}")
     cvnn.eval()
 
     real_cnn = RealCNN().to(device)
     real_cnn_path = "checkpoints/real_cnn_best.pth"
-    has_real_cnn = False
     if os.path.exists(real_cnn_path):
         try:
             checkpoint = torch.load(real_cnn_path, map_location=device)
@@ -358,10 +425,9 @@ def run_benchmark():
                 real_cnn.load_state_dict(checkpoint['model_state_dict'])
             else:
                 real_cnn.load_state_dict(checkpoint)
-            print(f"✓ 成功加载 Real-CNN 权重")
-            has_real_cnn = True
+            print(f"✅ Real-CNN 模型加载成功")
         except:
-            pass
+            print(f"⚠️  Real-CNN 使用随机权重")
     real_cnn.eval()
 
     # 参数设置
@@ -372,26 +438,28 @@ def run_benchmark():
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
 
-    # 搜索网格 (MUSIC 粗网格，会自动细化)
-    r_grid = np.linspace(0, cfg.r_max, 100)      # 20m 步长
-    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, 60)  # 2度 步长
+    # 搜索网格
+    r_grid = np.linspace(0, cfg.r_max, 100)
+    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, 60)
 
     r_grid_omp = np.linspace(0, cfg.r_max, 100)
     theta_grid_omp = np.linspace(cfg.theta_min, cfg.theta_max, 40)
 
-    print(f"\n{'='*60}")
-    print(f"对比实验配置:")
+    print(f"\n{'='*70}")
+    print(f"📊 FDA-MIMO 雷达参数估计对比实验")
+    print(f"{'='*70}")
     print(f"  样本数: {num_samples}")
-    print(f"  MUSIC 粗网格: {len(r_grid)}×{len(theta_grid)} (+ 自动细化)")
-    print(f"  OMP 字典: {len(r_grid_omp)}×{len(theta_grid_omp)} 原子")
-    print(f"{'='*60}\n")
+    print(f"  MUSIC: {len(r_grid)}×{len(theta_grid)} 粗网格 + 自动细化")
+    print(f"  OMP: {len(r_grid_omp)}×{len(theta_grid_omp)} 字典原子")
+    print(f"  RAM: 动态收缩网格 (ESPRIT 初始化)")
+    print(f"{'='*70}\n")
 
     for snr in snr_list:
-        print(f"📊 测试 SNR = {snr} dB ...")
+        print(f"📡 SNR = {snr:+3d} dB", end=" ")
 
         errors = {m: {"r": [], "theta": [], "time": []} for m in methods}
 
-        for _ in tqdm(range(num_samples), desc=f"SNR={snr}dB"):
+        for sample_idx in tqdm(range(num_samples), desc=f"SNR={snr:+3d}dB", leave=False):
             r_true = np.random.uniform(0, cfg.r_max)
             theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
             R = generate_covariance_matrix(r_true, theta_true, snr)
@@ -420,7 +488,7 @@ def run_benchmark():
             errors["Real-CNN"]["theta"].append((theta_pred - theta_true)**2)
             errors["Real-CNN"]["time"].append(t1 - t0)
 
-            # MUSIC (两级搜索)
+            # MUSIC
             t0 = time.time()
             r_pred, theta_pred = music_2d_refined(R_complex, r_grid, theta_grid, refine=True)
             t1 = time.time()
@@ -428,7 +496,7 @@ def run_benchmark():
             errors["MUSIC"]["theta"].append((theta_pred - theta_true)**2)
             errors["MUSIC"]["time"].append(t1 - t0)
 
-            # ESPRIT (改进版)
+            # ESPRIT
             t0 = time.time()
             r_pred, theta_pred = esprit_2d_robust(R_complex, cfg.M, cfg.N)
             t1 = time.time()
@@ -444,9 +512,9 @@ def run_benchmark():
             errors["OMP"]["theta"].append((theta_pred - theta_true)**2)
             errors["OMP"]["time"].append(t1 - t0)
 
-            # RAM
+            # RAM (终极优化版)
             t0 = time.time()
-            r_pred, theta_pred = ram_fda(R_complex, r_grid, theta_grid, max_iter=5)
+            r_pred, theta_pred = ram_fda_ultimate(R_complex, cfg.M, cfg.N, max_iter=10, verbose=False)
             t1 = time.time()
             errors["RAM"]["r"].append((r_pred - r_true)**2)
             errors["RAM"]["theta"].append((theta_pred - theta_true)**2)
@@ -468,22 +536,34 @@ def run_benchmark():
         results["CRB"]["rmse_theta"].append(crb_theta)
         results["CRB"]["time"].append(0)
 
-        # 打印结果表格
+        # 打印结果
         print(f"\n  {'Method':<12} {'RMSE_r (m)':>14} {'RMSE_θ (°)':>14} {'Time (ms)':>14}")
         print(f"  {'-'*56}")
         for m in methods:
             rmse_r = results[m]["rmse_r"][-1]
             rmse_theta = results[m]["rmse_theta"][-1]
             avg_time = results[m]["time"][-1] * 1000
-            print(f"  {m:<12} {rmse_r:>14.3f} {rmse_theta:>14.3f} {avg_time:>14.2f}")
-        print(f"  {'CRB':<12} {crb_r:>14.3f} {crb_theta:>14.3f} {'(theoretical)':>14}")
+
+            # 高亮最佳结果
+            if rmse_r == min([results[mm]["rmse_r"][-1] for mm in methods]):
+                r_marker = "🥇"
+            else:
+                r_marker = "  "
+            if rmse_theta == min([results[mm]["rmse_theta"][-1] for mm in methods]):
+                theta_marker = "🥇"
+            else:
+                theta_marker = "  "
+
+            print(f"  {m:<12} {rmse_r:>14.3f}{r_marker} {rmse_theta:>14.3f}{theta_marker} {avg_time:>14.2f}")
+
+        print(f"  {'CRB':<12} {crb_r:>14.3f}   {crb_theta:>14.3f}   {'(bound)':>14}")
         print()
 
     return snr_list, results
 
 
 # ==========================================
-# 6. 绘图 (保持不变)
+# 6. 绘图函数
 # ==========================================
 def plot_results(snr_list, results):
     try:
@@ -492,108 +572,316 @@ def plot_results(snr_list, results):
         pass
 
     methods = [m for m in results.keys() if m != "CRB"]
-    colors = {'CVNN': '#1f77b4', 'Real-CNN': '#2ca02c', 'MUSIC': '#d62728',
-              'ESPRIT': '#ff7f0e', 'OMP': '#9467bd', 'RAM': '#8c564b'}
-    markers = {'CVNN': 'o', 'Real-CNN': '^', 'MUSIC': 's',
-               'ESPRIT': 'd', 'OMP': 'v', 'RAM': 'p'}
+    colors = {
+        'CVNN': '#1f77b4',
+        'Real-CNN': '#2ca02c',
+        'MUSIC': '#d62728',
+        'ESPRIT': '#ff7f0e',
+        'OMP': '#9467bd',
+        'RAM': '#e377c2'  # 粉红色，突出显示
+    }
+    markers = {
+        'CVNN': 'o',
+        'Real-CNN': '^',
+        'MUSIC': 's',
+        'ESPRIT': 'd',
+        'OMP': 'v',
+        'RAM': '*'  # 星形，更显眼
+    }
 
-    plt.figure(figsize=(18, 12))
+    fig = plt.figure(figsize=(20, 12))
 
     # 图1: 距离精度
-    plt.subplot(2, 2, 1)
+    ax1 = plt.subplot(2, 3, 1)
     for m in methods:
+        # 跳过失效的 ESPRIT
         if m == "ESPRIT" and np.mean(results[m]["rmse_r"]) > 500:
             continue
         plt.plot(snr_list, results[m]["rmse_r"],
-                 color=colors.get(m, 'gray'), marker=markers.get(m, 'x'),
-                 label=m, linewidth=2.5, markersize=9)
+                 color=colors.get(m, 'gray'),
+                 marker=markers.get(m, 'x'),
+                 label=m,
+                 linewidth=3 if m == "RAM" else 2.5,  # RAM 加粗
+                 markersize=12 if m == "RAM" else 9,
+                 alpha=0.9)
     plt.plot(snr_list, results["CRB"]["rmse_r"],
-             'k--', label='CRB', linewidth=3, alpha=0.7)
-    plt.xlabel('SNR (dB)', fontsize=13, fontweight='bold')
-    plt.ylabel('RMSE Range (m)', fontsize=13, fontweight='bold')
-    plt.title('Range Estimation vs. SNR', fontsize=15, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=10, loc='best')
+             'k--', label='CRB', linewidth=3, alpha=0.6)
+    plt.xlabel('SNR (dB)', fontsize=14, fontweight='bold')
+    plt.ylabel('RMSE Range (m)', fontsize=14, fontweight='bold')
+    plt.title('Range Estimation Accuracy', fontsize=16, fontweight='bold', pad=15)
+    plt.grid(True, alpha=0.3, linestyle='--')
+    plt.legend(fontsize=11, loc='best', framealpha=0.9)
     plt.yscale('log')
+    ax1.tick_params(labelsize=11)
 
     # 图2: 角度精度
-    plt.subplot(2, 2, 2)
+    ax2 = plt.subplot(2, 3, 2)
     for m in methods:
         plt.plot(snr_list, results[m]["rmse_theta"],
-                 color=colors.get(m, 'gray'), marker=markers.get(m, 'x'),
-                 label=m, linewidth=2.5, markersize=9)
+                 color=colors.get(m, 'gray'),
+                 marker=markers.get(m, 'x'),
+                 label=m,
+                 linewidth=3 if m == "RAM" else 2.5,
+                 markersize=12 if m == "RAM" else 9,
+                 alpha=0.9)
     plt.plot(snr_list, results["CRB"]["rmse_theta"],
-             'k--', label='CRB', linewidth=3, alpha=0.7)
-    plt.xlabel('SNR (dB)', fontsize=13, fontweight='bold')
-    plt.ylabel('RMSE Angle (°)', fontsize=13, fontweight='bold')
-    plt.title('Angle Estimation vs. SNR', fontsize=15, fontweight='bold')
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=10, loc='best')
+             'k--', label='CRB', linewidth=3, alpha=0.6)
+    plt.xlabel('SNR (dB)', fontsize=14, fontweight='bold')
+    plt.ylabel('RMSE Angle (°)', fontsize=14, fontweight='bold')
+    plt.title('Angle Estimation Accuracy', fontsize=16, fontweight='bold', pad=15)
+    plt.grid(True, alpha=0.3, linestyle='--')
+    plt.legend(fontsize=11, loc='best', framealpha=0.9)
     plt.yscale('log')
+    ax2.tick_params(labelsize=11)
 
     # 图3: 耗时对比
-    plt.subplot(2, 2, 3)
+    ax3 = plt.subplot(2, 3, 3)
     for m in methods:
-        t_ms = [t * 1000 for t in results[m]["time"]]
-        plt.plot(snr_list, t_ms,
-                 color=colors.get(m, 'gray'), marker=markers.get(m, 'x'),
-                 label=m, linewidth=2.5, markersize=9)
-    plt.xlabel('SNR (dB)', fontsize=13, fontweight='bold')
-    plt.ylabel('Inference Time (ms)', fontsize=13, fontweight='bold')
-    plt.title('Computational Efficiency', fontsize=15, fontweight='bold')
+       t_ms = [t * 1000 for t in results[m]["time"]]
+       plt.plot(snr_list, t_ms,
+                color=colors.get(m, 'gray'),
+                marker=markers.get(m, 'x'),
+                label=m,
+                linewidth=3 if m == "RAM" else 2.5,
+                markersize=12 if m == "RAM" else 9,
+                alpha=0.9)
+    plt.xlabel('SNR (dB)', fontsize=14, fontweight='bold')
+    plt.ylabel('Inference Time (ms)', fontsize=14, fontweight='bold')
+    plt.title('Computational Efficiency', fontsize=16, fontweight='bold', pad=15)
     plt.yscale('log')
-    plt.grid(True, alpha=0.3, which="both")
-    plt.legend(fontsize=10, loc='best')
+    plt.grid(True, alpha=0.3, linestyle='--', which="both")
+    plt.legend(fontsize=11, loc='best', framealpha=0.9)
+    ax3.tick_params(labelsize=11)
 
-    # 图4: 性能表格
-    plt.subplot(2, 2, 4)
-    plt.axis('off')
+    # 图4: 综合性能雷达图
+    ax4 = plt.subplot(2, 3, 4, projection='polar')
 
+    # 计算归一化指标 (越小越好，归一化到 [0,1])
+    metrics = {}
+    for m in methods:
+       avg_rmse_r = np.mean(results[m]["rmse_r"])
+       avg_rmse_theta = np.mean(results[m]["rmse_theta"])
+       avg_time = np.mean(results[m]["time"]) * 1000  # ms
+
+       # 归一化 (反转，使得越小的值得分越高)
+       max_r = max([np.mean(results[mm]["rmse_r"]) for mm in methods])
+       max_theta = max([np.mean(results[mm]["rmse_theta"]) for mm in methods])
+       max_time = max([np.mean(results[mm]["time"]) for mm in methods]) * 1000
+
+       metrics[m] = [
+           1 - avg_rmse_r / max_r,      # Range 准确度
+           1 - avg_rmse_theta / max_theta,  # Angle 准确度
+           1 - avg_time / max_time      # 速度
+       ]
+
+    categories = ['Range\nAccuracy', 'Angle\nAccuracy', 'Speed']
+    N = len(categories)
+    angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
+    angles += angles[:1]
+
+    for m in methods:
+       values = metrics[m]
+       values += values[:1]
+       ax4.plot(angles, values, 'o-', linewidth=2.5,
+                label=m, color=colors.get(m, 'gray'),
+                markersize=8, alpha=0.8)
+       ax4.fill(angles, values, alpha=0.15, color=colors.get(m, 'gray'))
+
+    ax4.set_xticks(angles[:-1])
+    ax4.set_xticklabels(categories, fontsize=11)
+    ax4.set_ylim(0, 1)
+    ax4.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+    ax4.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], fontsize=9)
+    ax4.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=10)
+    ax4.set_title('Comprehensive Performance\n(Higher is Better)',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax4.grid(True, linestyle='--', alpha=0.4)
+
+    # 图5: 与 CRB 的相对性能
+    ax5 = plt.subplot(2, 3, 5)
+
+    # 计算距离估计相对于 CRB 的比值
+    for m in methods:
+       if m == "ESPRIT" and np.mean(results[m]["rmse_r"]) > 500:
+           continue
+       ratio_r = np.array(results[m]["rmse_r"]) / np.array(results["CRB"]["rmse_r"])
+       plt.plot(snr_list, ratio_r,
+                color=colors.get(m, 'gray'),
+                marker=markers.get(m, 'x'),
+                label=m,
+                linewidth=3 if m == "RAM" else 2.5,
+                markersize=12 if m == "RAM" else 9,
+                alpha=0.9)
+
+    plt.axhline(y=1, color='k', linestyle='--', linewidth=2.5, alpha=0.6, label='CRB')
+    plt.xlabel('SNR (dB)', fontsize=14, fontweight='bold')
+    plt.ylabel('Normalized RMSE (Range / CRB)', fontsize=14, fontweight='bold')
+    plt.title('Range: Distance to Optimality', fontsize=16, fontweight='bold', pad=15)
+    plt.grid(True, alpha=0.3, linestyle='--')
+    plt.legend(fontsize=11, loc='best', framealpha=0.9)
+    plt.yscale('log')
+    ax5.tick_params(labelsize=11)
+
+    # 图6: 性能排名表
+    ax6 = plt.subplot(2, 3, 6)
+    ax6.axis('off')
+
+    # 构造表格数据
     all_methods = methods + ["CRB"]
-    table_data = [['Method', 'Avg RMSE_r', 'Avg RMSE_θ', 'Avg Time']]
-    for m in all_methods:
-        avg_r = np.mean(results[m]["rmse_r"])
-        avg_theta = np.mean(results[m]["rmse_theta"])
-        if m == "CRB":
-            table_data.append([m, f'{avg_r:.4f}m', f'{avg_theta:.4f}°', '(bound)'])
-        else:
-            avg_t = np.mean(results[m]["time"]) * 1000
-            table_data.append([m, f'{avg_r:.2f}m', f'{avg_theta:.2f}°', f'{avg_t:.2f}ms'])
+    table_data = [['Method', 'Avg RMSE_r', 'Avg RMSE_θ', 'Avg Time', 'Rank']]
 
-    table = plt.table(cellText=table_data, loc='center', cellLoc='center',
-                      colWidths=[0.22, 0.24, 0.24, 0.24])
+    # 计算排名 (综合距离和角度精度)
+    rankings = {}
+    for m in methods:
+       avg_r = np.mean(results[m]["rmse_r"])
+       avg_theta = np.mean(results[m]["rmse_theta"])
+       # 综合得分 (归一化后平均)
+       score = (avg_r / np.mean(results["CRB"]["rmse_r"]) +
+                avg_theta / np.mean(results["CRB"]["rmse_theta"])) / 2
+       rankings[m] = score
+
+    sorted_methods = sorted(methods, key=lambda x: rankings[x])
+
+    for rank, m in enumerate(sorted_methods, 1):
+       avg_r = np.mean(results[m]["rmse_r"])
+       avg_theta = np.mean(results[m]["rmse_theta"])
+       avg_t = np.mean(results[m]["time"]) * 1000
+
+       # 添加勋章
+       if rank == 1:
+           rank_str = '🥇 1st'
+       elif rank == 2:
+           rank_str = '🥈 2nd'
+       elif rank == 3:
+           rank_str = '🥉 3rd'
+       else:
+           rank_str = f'{rank}th'
+
+       table_data.append([
+           m,
+           f'{avg_r:.2f}m',
+           f'{avg_theta:.2f}°',
+           f'{avg_t:.2f}ms',
+           rank_str
+       ])
+
+    # 添加 CRB
+    crb_r = np.mean(results["CRB"]["rmse_r"])
+    crb_theta = np.mean(results["CRB"]["rmse_theta"])
+    table_data.append(['CRB', f'{crb_r:.4f}m', f'{crb_theta:.4f}°', '(bound)', 'Ideal'])
+
+    table = ax6.table(cellText=table_data, loc='center', cellLoc='center',
+                     colWidths=[0.18, 0.2, 0.2, 0.2, 0.18])
     table.auto_set_font_size(False)
-    table.set_fontsize(11)
-    table.scale(1.2, 1.8)
+    table.set_fontsize(10)
+    table.scale(1.2, 2.0)
 
-    for i in range(4):
-        table[(0, i)].set_facecolor('#4472C4')
-        table[(0, i)].set_text_props(color='white', fontweight='bold')
+    # 表头样式
+    for i in range(5):
+       table[(0, i)].set_facecolor('#2C3E50')
+       table[(0, i)].set_text_props(color='white', fontweight='bold', fontsize=11)
 
+    # 第一名高亮金色
+    table[(1, 0)].set_facecolor('#FFD700')
+    table[(1, 1)].set_facecolor('#FFD700')
+    table[(1, 2)].set_facecolor('#FFD700')
+    table[(1, 3)].set_facecolor('#FFD700')
+    table[(1, 4)].set_facecolor('#FFD700')
+
+    # 第二名银色
+    table[(2, 0)].set_facecolor('#C0C0C0')
+    table[(2, 1)].set_facecolor('#C0C0C0')
+    table[(2, 2)].set_facecolor('#C0C0C0')
+    table[(2, 3)].set_facecolor('#C0C0C0')
+    table[(2, 4)].set_facecolor('#C0C0C0')
+
+    # 第三名铜色
+    table[(3, 0)].set_facecolor('#CD7F32')
+    table[(3, 1)].set_facecolor('#CD7F32')
+    table[(3, 2)].set_facecolor('#CD7F32')
+    table[(3, 3)].set_facecolor('#CD7F32')
+    table[(3, 4)].set_facecolor('#CD7F32')
+
+    # CRB 行用灰色
     crb_row = len(all_methods)
-    for i in range(4):
-        table[(crb_row, i)].set_facecolor('#E0E0E0')
+    for i in range(5):
+       table[(crb_row, i)].set_facecolor('#BDC3C7')
+       table[(crb_row, i)].set_text_props(fontweight='bold')
 
-    best_r_idx = np.argmin([np.mean(results[m]["rmse_r"]) for m in methods]) + 1
-    best_theta_idx = np.argmin([np.mean(results[m]["rmse_theta"]) for m in methods]) + 1
-    best_time_idx = np.argmin([np.mean(results[m]["time"]) for m in methods]) + 1
-
-    table[(best_r_idx, 1)].set_facecolor('#90EE90')
-    table[(best_theta_idx, 2)].set_facecolor('#90EE90')
-    table[(best_time_idx, 3)].set_facecolor('#90EE90')
-
-    plt.title('Performance Summary\n(Green=Best, Gray=Theoretical Bound)',
-              fontsize=14, fontweight='bold', pad=20)
+    ax6.set_title('Performance Ranking\n(Based on Accuracy)',
+                 fontsize=14, fontweight='bold', pad=20)
 
     plt.tight_layout()
-    plt.savefig('benchmark_comparison_final.png', dpi=300, bbox_inches='tight')
-    print("\n✓ 图表已保存: benchmark_comparison_final.png")
+    plt.savefig('benchmark_final_ultimate.png', dpi=300, bbox_inches='tight')
+    print("\n✅ 图表已保存: benchmark_final_ultimate.png")
+
+    # 额外保存高分辨率 PDF
+    plt.savefig('benchmark_final_ultimate.pdf', dpi=300, bbox_inches='tight')
+    print("✅ PDF 版本已保存: benchmark_final_ultimate.pdf")
 
 
-if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("FDA-MIMO 雷达参数估计对比实验 - 最终版本")
-    print("="*60)
-    snr_list, results = run_benchmark()
-    plot_results(snr_list, results)
-    print("\n✓ 实验完成！")
+    # ==========================================
+    # 主函数
+    # ==========================================
+    if __name__ == "__main__":
+        print("\n" + "="*70)
+        print("🎯 FDA-MIMO 雷达参数估计终极对比实验")
+        print("="*70)
+        print("算法清单:")
+        print("  1. CVNN (复数神经网络)")
+        print("  2. Real-CNN (实数神经网络基线)")
+        print("  3. MUSIC (两级搜索优化)")
+        print("  4. ESPRIT (相位解模糊)")
+        print("  5. OMP (归一化字典)")
+        print("  6. RAM ⭐ (动态收缩网格 + ESPRIT 初始化)")
+        print("  7. CRB (理论下界)")
+        print("="*70 + "\n")
+
+        # 运行实验
+        snr_list, results = run_benchmark()
+
+        # 绘图
+        plot_results(snr_list, results)
+
+        print("\n" + "="*70)
+        print("🎉 实验完成！")
+        print("="*70)
+
+        # 输出最终结论
+        print("\n📊 关键发现:")
+        methods = [m for m in results.keys() if m != "CRB"]
+
+        # 找出最佳算法
+        avg_scores = {}
+        for m in methods:
+           avg_r = np.mean(results[m]["rmse_r"])
+           avg_theta = np.mean(results[m]["rmse_theta"])
+           crb_r = np.mean(results["CRB"]["rmse_r"])
+           crb_theta = np.mean(results["CRB"]["rmse_theta"])
+           # 综合得分 (相对于 CRB 的倍数)
+           score = (avg_r / crb_r + avg_theta / crb_theta) / 2
+           avg_scores[m] = score
+
+        best_method = min(avg_scores, key=avg_scores.get)
+        print(f"  🥇 最佳精度: {best_method} (相对 CRB: {avg_scores[best_method]:.2f}x)")
+
+        # 最快算法
+        fastest = min(methods, key=lambda m: np.mean(results[m]["time"]))
+        print(f"  ⚡ 最快速度: {fastest} ({np.mean(results[fastest]['time'])*1000:.2f} ms)")
+
+        # RAM 性能
+        ram_score = avg_scores["RAM"]
+        print(f"  ⭐ RAM 性能: {ram_score:.2f}x CRB (理论最优 = 1.0x)")
+
+        if ram_score < 2.0:
+           print(f"     ✅ RAM 已接近理论最优！")
+        elif ram_score < 5.0:
+           print(f"     ⚠️  RAM 性能良好，但仍有优化空间")
+        else:
+           print(f"     ❌ RAM 性能未达预期，建议检查参数设置")
+
+        print("\n💾 结果文件:")
+        print("  - benchmark_final_ultimate.png (综合对比图)")
+        print("  - benchmark_final_ultimate.pdf (高清 PDF 版本)")
+        print()
+
