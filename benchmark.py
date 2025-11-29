@@ -1,11 +1,11 @@
-"""
-FDA-MIMO 雷达参数估计对比实验 - 终极优化版
-关键改进:
-1. MUSIC: 两级搜索 (粗网格 + 局部细化)
-2. ESPRIT: 相位解模糊
-3. OMP: 归一化字典
-4. RAM: 动态收缩网格 + ESPRIT 初始化 ⭐ 核心优化
-5. CRB: 完整 FIM 计算
+"""FDA-MIMO 雷达参数估计对比实验
+算法清单:
+1. CVNN: 复数神经网络 (本文方法)
+2. Real-CNN: 实数神经网络基线
+3. MUSIC: 子空间方法 (两级搜索)
+4. ESPRIT: 旋转不变性方法
+5. OMP: 稀疏重构方法
+6. CRB: 克拉美-罗界 (理论下界)
 """
 
 import numpy as np
@@ -281,120 +281,6 @@ def omp_2d(R, r_grid, theta_grid, K=1):
 
 
 # ==========================================
-# 4. RAM 终极优化版 ⭐
-# ==========================================
-def ram_fda_ultimate(R, M, N, max_iter=10, verbose=False):
-    """
-    RAM 终极优化版本
-    核心改进:
-    1. ESPRIT 智能初始化
-    2. 动态收缩网格 (Zoom-in Strategy)
-    3. 早停机制 (Convergence Detection)
-    """
-    # 准备噪声子空间
-    w, v = np.linalg.eigh(R)
-    idx = np.argsort(w)
-    v = v[:, idx]
-    Un = v[:, :-1]
-
-    # 代价函数 (最小化噪声子空间投影)
-    def cost_function(r, theta):
-        a = get_steering_vector(r, theta)
-        proj = Un.conj().T @ a
-        return np.sum(np.abs(proj)**2)
-
-    # === 初始化: 使用 ESPRIT ===
-    try:
-        r_curr, theta_curr = esprit_2d_robust(R, M, N)
-        if verbose:
-            print(f"  ESPRIT 初始化: r={r_curr:.1f}m, θ={theta_curr:.1f}°")
-    except:
-        # 回退到中心点
-        r_curr = cfg.r_max / 2
-        theta_curr = 0
-        if verbose:
-            print(f"  使用中心点初始化")
-
-    # === 交替最小化迭代 ===
-    # 初始搜索范围 (根据系统参数自适应设置)
-    r_search_range = min(200.0, cfg.r_max * 0.2)  # 初始 ±200m 或 ±20%
-    theta_search_range = 10.0  # 初始 ±10°
-
-    # 收缩因子
-    shrink_factor = 0.6
-
-    # 早停判据
-    tolerance_r = 0.1  # 米
-    tolerance_theta = 0.01  # 度
-
-    for iteration in range(max_iter):
-        prev_r = r_curr
-        prev_theta = theta_curr
-
-        # --- Step 1: 固定 Theta，优化 Range ---
-        r_grid_local = np.linspace(
-            max(0, r_curr - r_search_range),
-            min(cfg.r_max, r_curr + r_search_range),
-            61  # 高密度局部网格
-        )
-
-        best_cost = float('inf')
-        best_r = r_curr
-
-        for r_val in r_grid_local:
-            cost = cost_function(r_val, theta_curr)
-            if cost < best_cost:
-                best_cost = cost
-                best_r = r_val
-
-        r_curr = best_r
-
-        # --- Step 2: 固定 Range，优化 Theta ---
-        theta_grid_local = np.linspace(
-            max(cfg.theta_min, theta_curr - theta_search_range),
-            min(cfg.theta_max, theta_curr + theta_search_range),
-            61
-        )
-
-        best_cost = float('inf')
-        best_theta = theta_curr
-
-        for theta_val in theta_grid_local:
-            cost = cost_function(r_curr, theta_val)
-            if cost < best_cost:
-                best_cost = cost
-                best_theta = theta_val
-
-        theta_curr = best_theta
-
-        # --- 检查收敛 ---
-        delta_r = abs(r_curr - prev_r)
-        delta_theta = abs(theta_curr - prev_theta)
-
-        if verbose:
-            print(f"  Iter {iteration+1}: r={r_curr:.2f}m, θ={theta_curr:.2f}°, "
-                  f"Δr={delta_r:.2f}, Δθ={delta_theta:.3f}")
-
-        # 早停
-        if delta_r < tolerance_r and delta_theta < tolerance_theta:
-            if verbose:
-                print(f"  已收敛，提前终止于第 {iteration+1} 次迭代")
-            break
-
-        # --- 收缩搜索范围 (Zoom-in) ---
-        r_search_range *= shrink_factor
-        theta_search_range *= shrink_factor
-
-        # 防止过度收缩
-        if r_search_range < 1.0:
-            r_search_range = 1.0
-        if theta_search_range < 0.1:
-            theta_search_range = 0.1
-
-    return r_curr, theta_curr
-
-
-# ==========================================
 # 5. 运行对比实验
 # ==========================================
 def run_benchmark():
@@ -430,11 +316,28 @@ def run_benchmark():
             print(f"⚠️  Real-CNN 使用随机权重")
     real_cnn.eval()
 
+    # ========== GPU 预热 (Warm-up) ==========
+    print("🔥 正在预热 GPU (Warm-up)...")
+    # 生成 dummy input，形状与真实数据一致
+    dummy_input = torch.randn(1, 2, cfg.M * cfg.N, cfg.M * cfg.N).to(device)
+    
+    # 强制让两个网络都空跑几次，消除冷启动开销
+    with torch.no_grad():
+        for _ in range(10):
+            _ = cvnn(dummy_input)
+            _ = real_cnn(dummy_input)
+    
+    # 强制同步 GPU，确保预热完成
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    
+    print("✅ 预热完成，开始正式测试...")
+
     # 参数设置
-    snr_list = [-5, 0, 5, 10, 15, 20]
+    snr_list = [-10, -5, 0, 5, 10]
     num_samples = 50
 
-    methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP", "RAM"]
+    methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
 
@@ -451,7 +354,6 @@ def run_benchmark():
     print(f"  样本数: {num_samples}")
     print(f"  MUSIC: {len(r_grid)}×{len(theta_grid)} 粗网格 + 自动细化")
     print(f"  OMP: {len(r_grid_omp)}×{len(theta_grid_omp)} 字典原子")
-    print(f"  RAM: 动态收缩网格 (ESPRIT 初始化)")
     print(f"{'='*70}\n")
 
     for snr in snr_list:
@@ -512,14 +414,6 @@ def run_benchmark():
             errors["OMP"]["theta"].append((theta_pred - theta_true)**2)
             errors["OMP"]["time"].append(t1 - t0)
 
-            # RAM (终极优化版)
-            t0 = time.time()
-            r_pred, theta_pred = ram_fda_ultimate(R_complex, cfg.M, cfg.N, max_iter=10, verbose=False)
-            t1 = time.time()
-            errors["RAM"]["r"].append((r_pred - r_true)**2)
-            errors["RAM"]["theta"].append((theta_pred - theta_true)**2)
-            errors["RAM"]["time"].append(t1 - t0)
-
         # 计算 RMSE
         for m in methods:
             rmse_r = np.sqrt(np.mean(errors[m]["r"]))
@@ -577,16 +471,14 @@ def plot_results(snr_list, results):
         'Real-CNN': '#2ca02c',
         'MUSIC': '#d62728',
         'ESPRIT': '#ff7f0e',
-        'OMP': '#9467bd',
-        'RAM': '#e377c2'  # 粉红色，突出显示
+        'OMP': '#9467bd'
     }
     markers = {
         'CVNN': 'o',
         'Real-CNN': '^',
         'MUSIC': 's',
         'ESPRIT': 'd',
-        'OMP': 'v',
-        'RAM': '*'  # 星形，更显眼
+        'OMP': 'v'
     }
 
     fig = plt.figure(figsize=(20, 12))
@@ -601,8 +493,8 @@ def plot_results(snr_list, results):
                  color=colors.get(m, 'gray'),
                  marker=markers.get(m, 'x'),
                  label=m,
-                 linewidth=3 if m == "RAM" else 2.5,  # RAM 加粗
-                 markersize=12 if m == "RAM" else 9,
+                 linewidth=2.5,
+                 markersize=9,
                  alpha=0.9)
     plt.plot(snr_list, results["CRB"]["rmse_r"],
              'k--', label='CRB', linewidth=3, alpha=0.6)
@@ -621,8 +513,8 @@ def plot_results(snr_list, results):
                  color=colors.get(m, 'gray'),
                  marker=markers.get(m, 'x'),
                  label=m,
-                 linewidth=3 if m == "RAM" else 2.5,
-                 markersize=12 if m == "RAM" else 9,
+                 linewidth=2.5,
+                 markersize=9,
                  alpha=0.9)
     plt.plot(snr_list, results["CRB"]["rmse_theta"],
              'k--', label='CRB', linewidth=3, alpha=0.6)
@@ -642,8 +534,8 @@ def plot_results(snr_list, results):
                 color=colors.get(m, 'gray'),
                 marker=markers.get(m, 'x'),
                 label=m,
-                linewidth=3 if m == "RAM" else 2.5,
-                markersize=12 if m == "RAM" else 9,
+                linewidth=2.5,
+                markersize=9,
                 alpha=0.9)
     plt.xlabel('SNR (dB)', fontsize=14, fontweight='bold')
     plt.ylabel('Inference Time (ms)', fontsize=14, fontweight='bold')
@@ -709,8 +601,8 @@ def plot_results(snr_list, results):
                 color=colors.get(m, 'gray'),
                 marker=markers.get(m, 'x'),
                 label=m,
-                linewidth=3 if m == "RAM" else 2.5,
-                markersize=12 if m == "RAM" else 9,
+                linewidth=2.5,
+                markersize=9,
                 alpha=0.9)
 
     plt.axhline(y=1, color='k', linestyle='--', linewidth=2.5, alpha=0.6, label='CRB')
@@ -825,16 +717,15 @@ def plot_results(snr_list, results):
 # ==========================================
 if __name__ == "__main__":
     print("\n" + "="*70)
-    print("🎯 FDA-MIMO 雷达参数估计终极对比实验")
+    print("🎯 FDA-MIMO 雷达参数估计对比实验")
     print("="*70)
     print("算法清单:")
     print("  1. CVNN (复数神经网络)")
     print("  2. Real-CNN (实数神经网络基线)")
-    print("  3. MUSIC (两级搜索优化)")
-    print("  4. ESPRIT (相位解模糊)")
-    print("  5. OMP (归一化字典)")
-    print("  6. RAM ⭐ (动态收缩网格 + ESPRIT 初始化)")
-    print("  7. CRB (理论下界)")
+    print("  3. MUSIC (子空间方法)")
+    print("  4. ESPRIT (旋转不变性方法)")
+    print("  5. OMP (稀疏重构方法)")
+    print("  6. CRB (理论下界)")
     print("="*70 + "\n")
 
     # 运行实验
@@ -868,17 +759,6 @@ if __name__ == "__main__":
     # 最快算法
     fastest = min(methods, key=lambda m: np.mean(results[m]["time"]))
     print(f"  ⚡ 最快速度: {fastest} ({np.mean(results[fastest]['time'])*1000:.2f} ms)")
-
-    # RAM 性能
-    ram_score = avg_scores["RAM"]
-    print(f"  ⭐ RAM 性能: {ram_score:.2f}x CRB (理论最优 = 1.0x)")
-
-    if ram_score < 2.0:
-       print(f"     ✅ RAM 已接近理论最优！")
-    elif ram_score < 5.0:
-       print(f"     ⚠️  RAM 性能良好，但仍有优化空间")
-    else:
-       print(f"     ❌ RAM 性能未达预期，建议检查参数设置")
 
     print("\n💾 结果文件:")
     print("  - benchmark_final_ultimate.png (综合对比图)")
