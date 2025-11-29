@@ -64,6 +64,65 @@ class ComplexSEBlock(nn.Module):
         return x * attn
 
 
+class ComplexFARBlock(nn.Module):
+    """
+    复数版 FAR (Feature Attention Refinement) Block
+    
+    与 SE 的核心区别：
+    - SE: 全局池化 → 通道级注意力 [B, 1, C, 1, 1]
+    - FAR: 局部池化 → 空间+通道级注意力 [B, 1, C, H, W]
+    
+    优势：保留空间位置信息，更适合协方差矩阵这种空间结构有意义的输入
+    """
+    def __init__(self, channels, kernel_size=3, reduction=4):
+        super().__init__()
+        
+        features = max(channels // reduction, 8)  # 确保至少8个特征
+        padding = (kernel_size - 1) // 2
+        
+        # 1. 局部平均池化 (LAP) - 获取局部上下文，不改变尺寸
+        self.local_avg_pool = ComplexAvgPool2d(
+            kernel_size=kernel_size, stride=1, padding=padding
+        )
+        
+        # 2. 特征重加权网络
+        # Layer 1: 降维 (1x1 Conv)
+        self.conv1 = ComplexConv2d(channels, features, kernel_size=1)
+        self.bn1 = ComplexBatchNorm2d(features)
+        self.act1 = ModReLU(features, bias_init=-0.5)
+        
+        # Layer 2: 升维 (1x1 Conv)
+        self.conv2 = ComplexConv2d(features, channels, kernel_size=1)
+        
+        # Sigmoid 用于生成注意力权重
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        """
+        x: [B, 2, C, H, W]
+        """
+        # 1. 局部平均池化获取上下文
+        y = self.local_avg_pool(x)  # [B, 2, C, H, W]
+        
+        # 2. 生成注意力权重
+        y = self.conv1(y)
+        y = self.bn1(y)
+        y = self.act1(y)
+        y = self.conv2(y)  # [B, 2, C, H, W]
+        
+        # 3. 基于模值生成注意力图
+        real = y[:, 0]  # [B, C, H, W]
+        imag = y[:, 1]
+        mag = torch.sqrt(real**2 + imag**2 + 1e-8)
+        attn = self.sigmoid(mag)  # [B, C, H, W]
+        
+        # 扩展维度: [B, 1, C, H, W]
+        attn = attn.unsqueeze(1)
+        
+        # 4. 重加权
+        return x * attn
+
+
 class ComplexCBAM(nn.Module):
     """
     复数 CBAM (Convolutional Block Attention Module)
@@ -307,6 +366,113 @@ class FDA_CVNN_Attention(nn.Module):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
+class FDA_CVNN_FAR(nn.Module):
+    """
+    带 FAR (Feature Attention Refinement) 注意力的 FDA-CVNN
+    
+    FAR 的优势 (相比 SE):
+    1. 使用局部平均池化，保留空间位置信息
+    2. 生成空间+通道级注意力图 [B, 1, C, H, W]
+    3. 更适合协方差矩阵这种空间结构有意义的输入
+    4. 在低 SNR 下可以针对不同位置给不同权重
+    """
+    def __init__(self, far_kernel_size=3):
+        super().__init__()
+        
+        # Block 1: 100 -> 50
+        self.conv1 = ComplexConv2d(1, 32, kernel_size=3, padding=1)
+        self.bn1 = ComplexBatchNorm2d(32)
+        self.act1 = ModReLU(32, bias_init=-0.5)
+        self.attn1 = ComplexFARBlock(32, kernel_size=far_kernel_size)
+        self.pool1 = ComplexAvgPool2d(2)
+        
+        # Block 2: 50 -> 25
+        self.conv2 = ComplexConv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = ComplexBatchNorm2d(64)
+        self.act2 = ModReLU(64, bias_init=-0.5)
+        self.attn2 = ComplexFARBlock(64, kernel_size=far_kernel_size)
+        self.pool2 = ComplexAvgPool2d(2)
+        
+        # Block 3: 25 -> 12
+        self.conv3 = ComplexConv2d(64, 128, kernel_size=3, padding=1)
+        self.bn3 = ComplexBatchNorm2d(128)
+        self.act3 = ModReLU(128, bias_init=-0.5)
+        self.attn3 = ComplexFARBlock(128, kernel_size=far_kernel_size)
+        self.pool3 = ComplexAvgPool2d(2)
+        
+        # Block 4: 12 -> 6
+        self.conv4 = ComplexConv2d(128, 256, kernel_size=3, padding=1)
+        self.bn4 = ComplexBatchNorm2d(256)
+        self.act4 = ModReLU(256, bias_init=-0.5)
+        self.attn4 = ComplexFARBlock(256, kernel_size=far_kernel_size)
+        self.pool4 = ComplexAvgPool2d(2)
+        
+        # 全局平均池化
+        self.global_pool = ComplexAdaptiveAvgPool2d(1)
+        
+        # 全连接层
+        self.fc_in_dim = 256 * 2
+        
+        self.fc1 = nn.Linear(self.fc_in_dim, 256)
+        self.fc2 = nn.Linear(256, 64)
+        self.fc3 = nn.Linear(64, 2)
+        
+        self.dropout = nn.Dropout(0.4)
+        
+    def forward(self, x):
+        """
+        x: [B, 2, 100, 100]
+        """
+        x = x.unsqueeze(2)  # [B, 2, 1, 100, 100]
+        
+        # Block 1
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act1(x)
+        x = self.attn1(x)  # FAR 注意力
+        x = self.pool1(x)  # [B, 2, 32, 50, 50]
+        
+        # Block 2
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.act2(x)
+        x = self.attn2(x)
+        x = self.pool2(x)  # [B, 2, 64, 25, 25]
+        
+        # Block 3
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = self.act3(x)
+        x = self.attn3(x)
+        x = self.pool3(x)  # [B, 2, 128, 12, 12]
+        
+        # Block 4
+        x = self.conv4(x)
+        x = self.bn4(x)
+        x = self.act4(x)
+        x = self.attn4(x)
+        x = self.pool4(x)  # [B, 2, 256, 6, 6]
+        
+        # 全局池化
+        x = self.global_pool(x)  # [B, 2, 256, 1, 1]
+        
+        # 展平
+        b = x.shape[0]
+        x = x.view(b, -1)  # [B, 512]
+        
+        # 全连接回归
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = F.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = torch.sigmoid(self.fc3(x))
+        
+        return x
+    
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
 class FDA_CVNN_Light(nn.Module):
     """
     轻量级版本，适合快速测试
@@ -393,6 +559,19 @@ if __name__ == "__main__":
     print(f"输出形状: {y_cbam.shape}")
     print(f"输出范围: [{y_cbam.min().item():.4f}, {y_cbam.max().item():.4f}]")
     
+    # 测试 FAR 版本
+    print("\n" + "=" * 60)
+    print("测试 FDA_CVNN_FAR 模型 (FAR注意力) ⭐")
+    print("=" * 60)
+    
+    model_far = FDA_CVNN_FAR(far_kernel_size=3)
+    print(f"模型参数量: {model_far.count_parameters():,}")
+    
+    with torch.no_grad():
+        y_far = model_far(x)
+    print(f"输出形状: {y_far.shape}")
+    print(f"输出范围: [{y_far.min().item():.4f}, {y_far.max().item():.4f}]")
+    
     # 测试轻量级模型
     print("\n" + "=" * 60)
     print("测试 FDA_CVNN_Light 模型")
@@ -403,4 +582,15 @@ if __name__ == "__main__":
     with torch.no_grad():
         y_light = model_light(x)
     print(f"输出形状: {y_light.shape}")
-
+    
+    # 模型对比总结
+    print("\n" + "=" * 60)
+    print("📊 模型对比总结")
+    print("=" * 60)
+    print(f"{'模型':<25} {'参数量':>15} {'注意力类型':<20}")
+    print("-" * 60)
+    print(f"{'FDA_CVNN':<25} {model.count_parameters():>15,} {'无':<20}")
+    print(f"{'FDA_CVNN_Attention (SE)':<25} {model_attn.count_parameters():>15,} {'通道级 (全局池化)':<20}")
+    print(f"{'FDA_CVNN_Attention (CBAM)':<25} {model_cbam.count_parameters():>15,} {'通道+空间':<20}")
+    print(f"{'FDA_CVNN_FAR ⭐':<25} {model_far.count_parameters():>15,} {'空间+通道 (局部池化)':<20}")
+    print(f"{'FDA_CVNN_Light':<25} {model_light.count_parameters():>15,} {'无':<20}")

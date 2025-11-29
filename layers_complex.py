@@ -96,9 +96,9 @@ class ComplexAvgPool2d(nn.Module):
     警告：绝不能用 MaxPool！MaxPool 会分别取实部虚部的最大值，
     可能来自不同位置，破坏相位关系。
     """
-    def __init__(self, kernel_size, stride=None):
+    def __init__(self, kernel_size, stride=None, padding=0):
         super().__init__()
-        self.pool = nn.AvgPool2d(kernel_size, stride)
+        self.pool = nn.AvgPool2d(kernel_size, stride, padding)
         
     def forward(self, x):
         """

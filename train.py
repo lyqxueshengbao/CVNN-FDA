@@ -10,7 +10,7 @@ import numpy as np
 from tqdm import tqdm
 
 import config as cfg
-from model import FDA_CVNN, FDA_CVNN_Light, FDA_CVNN_Attention
+from model import FDA_CVNN, FDA_CVNN_Light, FDA_CVNN_Attention, FDA_CVNN_FAR
 from dataset import create_dataloaders, FastDataLoader
 from utils_physics import denormalize_labels
 
@@ -185,6 +185,9 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     elif model_type == 'cbam':
         model = FDA_CVNN_Attention(use_cbam=True).to(device)
         print("使用 CBAM (通道+空间) 注意力机制")
+    elif model_type == 'far':
+        model = FDA_CVNN_FAR(far_kernel_size=3).to(device)
+        print("使用 FAR (局部特征注意力) 机制 ⭐")
     else:
         model = FDA_CVNN().to(device)
     
@@ -298,8 +301,8 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='FDA-CVNN Training')
     parser.add_argument('--model', type=str, default='standard', 
-                        choices=['standard', 'light', 'attention', 'cbam'],
-                        help='Model type: standard, light, attention (SE), cbam (SE+spatial)')
+                        choices=['standard', 'light', 'attention', 'cbam', 'far'],
+                        help='Model type: standard, light, attention (SE), cbam (SE+spatial), far (FAR attention)')
     parser.add_argument('--epochs', type=int, default=None,
                         help='Number of epochs')
     parser.add_argument('--lr', type=float, default=None,
