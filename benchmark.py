@@ -820,68 +820,68 @@ def plot_results(snr_list, results):
     print("✅ PDF 版本已保存: benchmark_final_ultimate.pdf")
 
 
-    # ==========================================
-    # 主函数
-    # ==========================================
-    if __name__ == "__main__":
-        print("\n" + "="*70)
-        print("🎯 FDA-MIMO 雷达参数估计终极对比实验")
-        print("="*70)
-        print("算法清单:")
-        print("  1. CVNN (复数神经网络)")
-        print("  2. Real-CNN (实数神经网络基线)")
-        print("  3. MUSIC (两级搜索优化)")
-        print("  4. ESPRIT (相位解模糊)")
-        print("  5. OMP (归一化字典)")
-        print("  6. RAM ⭐ (动态收缩网格 + ESPRIT 初始化)")
-        print("  7. CRB (理论下界)")
-        print("="*70 + "\n")
+# ==========================================
+# 主函数
+# ==========================================
+if __name__ == "__main__":
+    print("\n" + "="*70)
+    print("🎯 FDA-MIMO 雷达参数估计终极对比实验")
+    print("="*70)
+    print("算法清单:")
+    print("  1. CVNN (复数神经网络)")
+    print("  2. Real-CNN (实数神经网络基线)")
+    print("  3. MUSIC (两级搜索优化)")
+    print("  4. ESPRIT (相位解模糊)")
+    print("  5. OMP (归一化字典)")
+    print("  6. RAM ⭐ (动态收缩网格 + ESPRIT 初始化)")
+    print("  7. CRB (理论下界)")
+    print("="*70 + "\n")
 
-        # 运行实验
-        snr_list, results = run_benchmark()
+    # 运行实验
+    snr_list, results = run_benchmark()
 
-        # 绘图
-        plot_results(snr_list, results)
+    # 绘图
+    plot_results(snr_list, results)
 
-        print("\n" + "="*70)
-        print("🎉 实验完成！")
-        print("="*70)
+    print("\n" + "="*70)
+    print("🎉 实验完成！")
+    print("="*70)
 
-        # 输出最终结论
-        print("\n📊 关键发现:")
-        methods = [m for m in results.keys() if m != "CRB"]
+    # 输出最终结论
+    print("\n📊 关键发现:")
+    methods = [m for m in results.keys() if m != "CRB"]
 
-        # 找出最佳算法
-        avg_scores = {}
-        for m in methods:
-           avg_r = np.mean(results[m]["rmse_r"])
-           avg_theta = np.mean(results[m]["rmse_theta"])
-           crb_r = np.mean(results["CRB"]["rmse_r"])
-           crb_theta = np.mean(results["CRB"]["rmse_theta"])
-           # 综合得分 (相对于 CRB 的倍数)
-           score = (avg_r / crb_r + avg_theta / crb_theta) / 2
-           avg_scores[m] = score
+    # 找出最佳算法
+    avg_scores = {}
+    for m in methods:
+       avg_r = np.mean(results[m]["rmse_r"])
+       avg_theta = np.mean(results[m]["rmse_theta"])
+       crb_r = np.mean(results["CRB"]["rmse_r"])
+       crb_theta = np.mean(results["CRB"]["rmse_theta"])
+       # 综合得分 (相对于 CRB 的倍数)
+       score = (avg_r / crb_r + avg_theta / crb_theta) / 2
+       avg_scores[m] = score
 
-        best_method = min(avg_scores, key=avg_scores.get)
-        print(f"  🥇 最佳精度: {best_method} (相对 CRB: {avg_scores[best_method]:.2f}x)")
+    best_method = min(avg_scores, key=avg_scores.get)
+    print(f"  🥇 最佳精度: {best_method} (相对 CRB: {avg_scores[best_method]:.2f}x)")
 
-        # 最快算法
-        fastest = min(methods, key=lambda m: np.mean(results[m]["time"]))
-        print(f"  ⚡ 最快速度: {fastest} ({np.mean(results[fastest]['time'])*1000:.2f} ms)")
+    # 最快算法
+    fastest = min(methods, key=lambda m: np.mean(results[m]["time"]))
+    print(f"  ⚡ 最快速度: {fastest} ({np.mean(results[fastest]['time'])*1000:.2f} ms)")
 
-        # RAM 性能
-        ram_score = avg_scores["RAM"]
-        print(f"  ⭐ RAM 性能: {ram_score:.2f}x CRB (理论最优 = 1.0x)")
+    # RAM 性能
+    ram_score = avg_scores["RAM"]
+    print(f"  ⭐ RAM 性能: {ram_score:.2f}x CRB (理论最优 = 1.0x)")
 
-        if ram_score < 2.0:
-           print(f"     ✅ RAM 已接近理论最优！")
-        elif ram_score < 5.0:
-           print(f"     ⚠️  RAM 性能良好，但仍有优化空间")
-        else:
-           print(f"     ❌ RAM 性能未达预期，建议检查参数设置")
+    if ram_score < 2.0:
+       print(f"     ✅ RAM 已接近理论最优！")
+    elif ram_score < 5.0:
+       print(f"     ⚠️  RAM 性能良好，但仍有优化空间")
+    else:
+       print(f"     ❌ RAM 性能未达预期，建议检查参数设置")
 
-        print("\n💾 结果文件:")
-        print("  - benchmark_final_ultimate.png (综合对比图)")
-        print("  - benchmark_final_ultimate.pdf (高清 PDF 版本)")
-        print()
+    print("\n💾 结果文件:")
+    print("  - benchmark_final_ultimate.png (综合对比图)")
+    print("  - benchmark_final_ultimate.pdf (高清 PDF 版本)")
+    print()
 
