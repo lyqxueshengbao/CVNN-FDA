@@ -286,6 +286,12 @@ def omp_2d(R, r_grid, theta_grid, K=1):
 def load_cvnn_model(device, model_path="checkpoints/fda_cvnn_best.pth"):
     """
     智能加载 CVNN 模型，自动检测模型类型
+    
+    支持的模型类型:
+    - FDA_CVNN: 标准 CVNN (无注意力模块)
+    - FDA_CVNN_Attention (SE): 有 attn*.fc.* 层
+    - FDA_CVNN_Attention (CBAM): 有 channel_attn 层
+    - FDA_CVNN_FAR: 有 attn*.conv1.conv_rr.* 层 (复数卷积做注意力)
     """
     if not os.path.exists(model_path):
         print(f"⚠️  模型文件不存在: {model_path}")
@@ -309,7 +315,7 @@ def load_cvnn_model(device, model_path="checkpoints/fda_cvnn_best.pth"):
                 model = FDA_CVNN_FAR().to(device)
             elif model_type == 'cbam':
                 model = FDA_CVNN_Attention(use_cbam=True).to(device)
-            elif model_type == 'attention':
+            elif model_type in ['attention', 'se']:
                 model = FDA_CVNN_Attention(use_cbam=False).to(device)
             else:
                 model = FDA_CVNN().to(device)
@@ -317,23 +323,22 @@ def load_cvnn_model(device, model_path="checkpoints/fda_cvnn_best.pth"):
             # 通过 state_dict 的 key 推断模型类型
             keys = list(state_dict.keys())
             
-            # FAR 特征: attn1.conv1 + attn1.conv2 (两个复数卷积层用于注意力)
-            has_far = any('attn1.conv1' in k and 'conv_rr' in k for k in keys) and \
-                      any('attn1.conv2' in k for k in keys)
-            # SE 特征: attn1.fc (全连接层)
-            has_se = any('attn1.fc' in k for k in keys)
-            # CBAM 特征: channel_attn + spatial_conv
+            # FAR 特征: attn*.conv1.conv_rr (复数卷积层做注意力)
+            has_far = any('attn' in k and 'conv1.conv_rr' in k for k in keys)
+            # SE 特征: attn*.fc.* (全连接层做注意力)
+            has_se = any('attn' in k and '.fc.' in k for k in keys)
+            # CBAM 特征: channel_attn (SE + 空间注意力)
             has_cbam = any('channel_attn' in k for k in keys)
             
             if has_far:
                 model = FDA_CVNN_FAR().to(device)
-                print("🔍 检测到 FAR 模型结构")
+                print("🔍 检测到 FAR 模型结构 (局部池化注意力)")
             elif has_cbam:
                 model = FDA_CVNN_Attention(use_cbam=True).to(device)
                 print("🔍 检测到 CBAM 注意力模型结构")
             elif has_se:
                 model = FDA_CVNN_Attention(use_cbam=False).to(device)
-                print("🔍 检测到 SE 注意力模型结构")
+                print("🔍 检测到 SE 注意力模型结构 (通道注意力)")
             else:
                 model = FDA_CVNN().to(device)
                 print("🔍 检测到标准 CVNN 模型结构")
