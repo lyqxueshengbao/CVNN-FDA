@@ -257,22 +257,21 @@ class FDA_CVNN(nn.Module):
 
 class FDA_CVNN_Attention(nn.Module):
     """
-    带注意力机制的 FDA-CVNN (增强低SNR性能)
+    保守版注意力 FDA-CVNN
     
-    改进点:
-    1. 每个卷积块后加入 SE 通道注意力
-    2. 残差连接帮助梯度流动
-    3. 更深的网络结构
+    设计原则：完全保持原始 FDA_CVNN 的架构，只加入轻量级 SE 注意力
+    - 保持 3 层卷积结构（不加深）
+    - 保持 pool3(5) 输出 5x5 特征图（不使用全局池化）
+    - 保持相同的全连接层结构
+    - 只在每个卷积块后加入 SE 通道注意力
     
-    在低 SNR 下，注意力机制可以:
-    - 自适应放大包含信号特征的通道
-    - 抑制噪声主导的通道
+    这样既能利用注意力机制抑制噪声通道，又不丢失空间信息
     """
     def __init__(self, use_cbam=False):
         super().__init__()
         self.use_cbam = use_cbam
         
-        # Block 1: 100 -> 50
+        # Block 1: 100 -> 50 (与原始 FDA_CVNN 完全一致)
         self.conv1 = ComplexConv2d(1, 32, kernel_size=3, padding=1)
         self.bn1 = ComplexBatchNorm2d(32)
         self.act1 = ModReLU(32, bias_init=-0.5)
@@ -286,31 +285,22 @@ class FDA_CVNN_Attention(nn.Module):
         self.attn2 = ComplexCBAM(64) if use_cbam else ComplexSEBlock(64)
         self.pool2 = ComplexAvgPool2d(2)
         
-        # Block 3: 25 -> 12
+        # Block 3: 25 -> 5 (关键：使用 pool(5) 而不是 pool(2)，保持与原始一致)
         self.conv3 = ComplexConv2d(64, 128, kernel_size=3, padding=1)
         self.bn3 = ComplexBatchNorm2d(128)
         self.act3 = ModReLU(128, bias_init=-0.5)
         self.attn3 = ComplexCBAM(128) if use_cbam else ComplexSEBlock(128)
-        self.pool3 = ComplexAvgPool2d(2)
+        self.pool3 = ComplexAvgPool2d(5)  # 输出 5x5，与原始一致
         
-        # Block 4: 12 -> 6 (新增一层，更深的网络)
-        self.conv4 = ComplexConv2d(128, 256, kernel_size=3, padding=1)
-        self.bn4 = ComplexBatchNorm2d(256)
-        self.act4 = ModReLU(256, bias_init=-0.5)
-        self.attn4 = ComplexCBAM(256) if use_cbam else ComplexSEBlock(256)
-        self.pool4 = ComplexAvgPool2d(2)
+        # 全连接层 (与原始 FDA_CVNN 完全一致)
+        # 特征图大小: 5x5, 通道128, 实部+虚部
+        self.fc_in_dim = 128 * 5 * 5 * 2  # 6400
         
-        # 全局平均池化
-        self.global_pool = ComplexAdaptiveAvgPool2d(1)
+        self.fc1 = nn.Linear(self.fc_in_dim, 512)
+        self.fc2 = nn.Linear(512, 128)
+        self.fc3 = nn.Linear(128, 2)
         
-        # 全连接层
-        self.fc_in_dim = 256 * 2  # 256通道 * 实部虚部
-        
-        self.fc1 = nn.Linear(self.fc_in_dim, 256)
-        self.fc2 = nn.Linear(256, 64)
-        self.fc3 = nn.Linear(64, 2)
-        
-        self.dropout = nn.Dropout(0.4)
+        self.dropout = nn.Dropout(0.3)  # 与原始一致
         
     def forward(self, x):
         """
@@ -322,7 +312,7 @@ class FDA_CVNN_Attention(nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.act1(x)
-        x = self.attn1(x)  # 注意力
+        x = self.attn1(x)  # SE 注意力
         x = self.pool1(x)  # [B, 2, 32, 50, 50]
         
         # Block 2
@@ -337,27 +327,16 @@ class FDA_CVNN_Attention(nn.Module):
         x = self.bn3(x)
         x = self.act3(x)
         x = self.attn3(x)
-        x = self.pool3(x)  # [B, 2, 128, 12, 12]
+        x = self.pool3(x)  # [B, 2, 128, 5, 5]
         
-        # Block 4
-        x = self.conv4(x)
-        x = self.bn4(x)
-        x = self.act4(x)
-        x = self.attn4(x)
-        x = self.pool4(x)  # [B, 2, 256, 6, 6]
-        
-        # 全局池化
-        x = self.global_pool(x)  # [B, 2, 256, 1, 1]
-        
-        # 展平
+        # 展平: 将复数维度和空间维度合并 (与原始一致)
         b = x.shape[0]
-        x = x.view(b, -1)  # [B, 512]
+        x = x.view(b, -1)  # [B, 2*128*5*5] = [B, 6400]
         
-        # 全连接回归
+        # 全连接回归 (与原始一致)
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
         x = F.relu(self.fc2(x))
-        x = self.dropout(x)
         x = torch.sigmoid(self.fc3(x))
         
         return x
@@ -368,13 +347,13 @@ class FDA_CVNN_Attention(nn.Module):
 
 class FDA_CVNN_FAR(nn.Module):
     """
-    带 FAR (Feature Attention Refinement) 注意力的 FDA-CVNN
+    保守版 FAR 注意力 FDA-CVNN
     
-    FAR 的优势 (相比 SE):
-    1. 使用局部平均池化，保留空间位置信息
-    2. 生成空间+通道级注意力图 [B, 1, C, H, W]
-    3. 更适合协方差矩阵这种空间结构有意义的输入
-    4. 在低 SNR 下可以针对不同位置给不同权重
+    FAR vs SE 的区别：
+    - SE: 全局池化 → 通道级权重 [B, 1, C, 1, 1]（所有位置相同权重）
+    - FAR: 局部池化 → 空间+通道级权重 [B, 1, C, H, W]（不同位置不同权重）
+    
+    设计原则：保持原始架构，只替换注意力模块
     """
     def __init__(self, far_kernel_size=3):
         super().__init__()
@@ -393,31 +372,21 @@ class FDA_CVNN_FAR(nn.Module):
         self.attn2 = ComplexFARBlock(64, kernel_size=far_kernel_size)
         self.pool2 = ComplexAvgPool2d(2)
         
-        # Block 3: 25 -> 12
+        # Block 3: 25 -> 5
         self.conv3 = ComplexConv2d(64, 128, kernel_size=3, padding=1)
         self.bn3 = ComplexBatchNorm2d(128)
         self.act3 = ModReLU(128, bias_init=-0.5)
         self.attn3 = ComplexFARBlock(128, kernel_size=far_kernel_size)
-        self.pool3 = ComplexAvgPool2d(2)
+        self.pool3 = ComplexAvgPool2d(5)  # 输出 5x5
         
-        # Block 4: 12 -> 6
-        self.conv4 = ComplexConv2d(128, 256, kernel_size=3, padding=1)
-        self.bn4 = ComplexBatchNorm2d(256)
-        self.act4 = ModReLU(256, bias_init=-0.5)
-        self.attn4 = ComplexFARBlock(256, kernel_size=far_kernel_size)
-        self.pool4 = ComplexAvgPool2d(2)
+        # 全连接层 (与原始一致)
+        self.fc_in_dim = 128 * 5 * 5 * 2  # 6400
         
-        # 全局平均池化
-        self.global_pool = ComplexAdaptiveAvgPool2d(1)
+        self.fc1 = nn.Linear(self.fc_in_dim, 512)
+        self.fc2 = nn.Linear(512, 128)
+        self.fc3 = nn.Linear(128, 2)
         
-        # 全连接层
-        self.fc_in_dim = 256 * 2
-        
-        self.fc1 = nn.Linear(self.fc_in_dim, 256)
-        self.fc2 = nn.Linear(256, 64)
-        self.fc3 = nn.Linear(64, 2)
-        
-        self.dropout = nn.Dropout(0.4)
+        self.dropout = nn.Dropout(0.3)
         
     def forward(self, x):
         """
@@ -444,27 +413,16 @@ class FDA_CVNN_FAR(nn.Module):
         x = self.bn3(x)
         x = self.act3(x)
         x = self.attn3(x)
-        x = self.pool3(x)  # [B, 2, 128, 12, 12]
-        
-        # Block 4
-        x = self.conv4(x)
-        x = self.bn4(x)
-        x = self.act4(x)
-        x = self.attn4(x)
-        x = self.pool4(x)  # [B, 2, 256, 6, 6]
-        
-        # 全局池化
-        x = self.global_pool(x)  # [B, 2, 256, 1, 1]
+        x = self.pool3(x)  # [B, 2, 128, 5, 5]
         
         # 展平
         b = x.shape[0]
-        x = x.view(b, -1)  # [B, 512]
+        x = x.view(b, -1)  # [B, 6400]
         
         # 全连接回归
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
         x = F.relu(self.fc2(x))
-        x = self.dropout(x)
         x = torch.sigmoid(self.fc3(x))
         
         return x
