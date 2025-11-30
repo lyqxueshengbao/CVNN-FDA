@@ -270,6 +270,7 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
             best_epoch = epoch
             torch.save({
                 'epoch': epoch,
+                'model_type': model_type,  # 保存模型类型，便于 benchmark 加载
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_rmse_r': val_metrics['rmse_r'],

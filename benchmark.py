@@ -16,7 +16,7 @@ import os
 from tqdm import tqdm
 
 import config as cfg
-from model import FDA_CVNN
+from model import FDA_CVNN, FDA_CVNN_Attention, FDA_CVNN_FAR
 from models_baseline import RealCNN
 from utils_physics import generate_covariance_matrix, get_steering_vector
 
@@ -283,23 +283,78 @@ def omp_2d(R, r_grid, theta_grid, K=1):
 # ==========================================
 # 5. 运行对比实验
 # ==========================================
+def load_cvnn_model(device, model_path="checkpoints/fda_cvnn_best.pth"):
+    """
+    智能加载 CVNN 模型，自动检测模型类型
+    """
+    if not os.path.exists(model_path):
+        print(f"⚠️  模型文件不存在: {model_path}")
+        return FDA_CVNN().to(device)
+    
+    try:
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        
+        # 获取 state_dict
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+            model_type = checkpoint.get('model_type', None)
+        else:
+            state_dict = checkpoint
+            model_type = None
+        
+        # 如果有保存的 model_type，直接使用
+        if model_type:
+            print(f"🔍 检测到保存的模型类型: {model_type}")
+            if model_type == 'far':
+                model = FDA_CVNN_FAR().to(device)
+            elif model_type == 'cbam':
+                model = FDA_CVNN_Attention(use_cbam=True).to(device)
+            elif model_type == 'attention':
+                model = FDA_CVNN_Attention(use_cbam=False).to(device)
+            else:
+                model = FDA_CVNN().to(device)
+        else:
+            # 通过 state_dict 的 key 推断模型类型
+            keys = list(state_dict.keys())
+            
+            # FAR 特征: attn1.conv1 + attn1.conv2 (两个复数卷积层用于注意力)
+            has_far = any('attn1.conv1' in k and 'conv_rr' in k for k in keys) and \
+                      any('attn1.conv2' in k for k in keys)
+            # SE 特征: attn1.fc (全连接层)
+            has_se = any('attn1.fc' in k for k in keys)
+            # CBAM 特征: channel_attn + spatial_conv
+            has_cbam = any('channel_attn' in k for k in keys)
+            
+            if has_far:
+                model = FDA_CVNN_FAR().to(device)
+                print("🔍 检测到 FAR 模型结构")
+            elif has_cbam:
+                model = FDA_CVNN_Attention(use_cbam=True).to(device)
+                print("🔍 检测到 CBAM 注意力模型结构")
+            elif has_se:
+                model = FDA_CVNN_Attention(use_cbam=False).to(device)
+                print("🔍 检测到 SE 注意力模型结构")
+            else:
+                model = FDA_CVNN().to(device)
+                print("🔍 检测到标准 CVNN 模型结构")
+        
+        # 加载权重
+        model.load_state_dict(state_dict)
+        print(f"✅ CVNN 模型加载成功 (参数量: {model.count_parameters():,})")
+        return model
+        
+    except Exception as e:
+        print(f"⚠️  CVNN 加载失败: {e}")
+        print("   使用默认 FDA_CVNN 模型")
+        return FDA_CVNN().to(device)
+
+
 def run_benchmark():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 使用设备: {device}")
 
-    # 加载模型
-    cvnn = FDA_CVNN().to(device)
-    cvnn_path = "checkpoints/fda_cvnn_best.pth"
-    if os.path.exists(cvnn_path):
-        try:
-            checkpoint = torch.load(cvnn_path, map_location=device)
-            if 'model_state_dict' in checkpoint:
-                cvnn.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                cvnn.load_state_dict(checkpoint)
-            print(f"✅ CVNN 模型加载成功")
-        except Exception as e:
-            print(f"⚠️  CVNN 加载失败: {e}")
+    # 智能加载 CVNN 模型
+    cvnn = load_cvnn_model(device)
     cvnn.eval()
 
     real_cnn = RealCNN().to(device)
