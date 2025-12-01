@@ -274,6 +274,8 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
             torch.save({
                 'epoch': epoch,
                 'model_type': model_type,  # 保存模型类型，便于 benchmark 加载
+                'se_reduction': se_reduction,  # 保存 SE 压缩比
+                'deep_only': deep_only,  # 保存是否只在深层使用注意力
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_rmse_r': val_metrics['rmse_r'],
