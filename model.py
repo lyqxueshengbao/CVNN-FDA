@@ -266,30 +266,44 @@ class FDA_CVNN_Attention(nn.Module):
     - 只在每个卷积块后加入 SE 通道注意力
     
     这样既能利用注意力机制抑制噪声通道，又不丢失空间信息
+    
+    参数:
+        use_cbam: 是否使用 CBAM (通道+空间注意力)，默认 False 使用 SE
+        se_reduction: SE 模块的通道压缩比，默认 4
+                      - 4: 标准配置 (32→8, 64→16, 128→32)
+                      - 8: 更激进压缩，减少过拟合风险
+                      - 16: 最激进，适合小数据集
+        deep_only: 是否只在深层使用注意力 (Block2, Block3)，默认 False
     """
-    def __init__(self, use_cbam=False):
+    def __init__(self, use_cbam=False, se_reduction=4, deep_only=False):
         super().__init__()
         self.use_cbam = use_cbam
+        self.se_reduction = se_reduction
+        self.deep_only = deep_only
         
         # Block 1: 100 -> 50 (与原始 FDA_CVNN 完全一致)
         self.conv1 = ComplexConv2d(1, 32, kernel_size=3, padding=1)
         self.bn1 = ComplexBatchNorm2d(32)
         self.act1 = ModReLU(32, bias_init=-0.5)
-        self.attn1 = ComplexCBAM(32) if use_cbam else ComplexSEBlock(32)
+        # 浅层注意力可选
+        if not deep_only:
+            self.attn1 = ComplexCBAM(32, reduction=se_reduction) if use_cbam else ComplexSEBlock(32, reduction=se_reduction)
+        else:
+            self.attn1 = None
         self.pool1 = ComplexAvgPool2d(2)
         
         # Block 2: 50 -> 25
         self.conv2 = ComplexConv2d(32, 64, kernel_size=3, padding=1)
         self.bn2 = ComplexBatchNorm2d(64)
         self.act2 = ModReLU(64, bias_init=-0.5)
-        self.attn2 = ComplexCBAM(64) if use_cbam else ComplexSEBlock(64)
+        self.attn2 = ComplexCBAM(64, reduction=se_reduction) if use_cbam else ComplexSEBlock(64, reduction=se_reduction)
         self.pool2 = ComplexAvgPool2d(2)
         
         # Block 3: 25 -> 5 (关键：使用 pool(5) 而不是 pool(2)，保持与原始一致)
         self.conv3 = ComplexConv2d(64, 128, kernel_size=3, padding=1)
         self.bn3 = ComplexBatchNorm2d(128)
         self.act3 = ModReLU(128, bias_init=-0.5)
-        self.attn3 = ComplexCBAM(128) if use_cbam else ComplexSEBlock(128)
+        self.attn3 = ComplexCBAM(128, reduction=se_reduction) if use_cbam else ComplexSEBlock(128, reduction=se_reduction)
         self.pool3 = ComplexAvgPool2d(5)  # 输出 5x5，与原始一致
         
         # 全连接层 (与原始 FDA_CVNN 完全一致)
@@ -312,21 +326,22 @@ class FDA_CVNN_Attention(nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.act1(x)
-        x = self.attn1(x)  # SE 注意力
+        if self.attn1 is not None:
+            x = self.attn1(x)  # SE 注意力 (浅层可选)
         x = self.pool1(x)  # [B, 2, 32, 50, 50]
         
         # Block 2
         x = self.conv2(x)
         x = self.bn2(x)
         x = self.act2(x)
-        x = self.attn2(x)
+        x = self.attn2(x)  # SE 注意力
         x = self.pool2(x)  # [B, 2, 64, 25, 25]
         
         # Block 3
         x = self.conv3(x)
         x = self.bn3(x)
         x = self.act3(x)
-        x = self.attn3(x)
+        x = self.attn3(x)  # SE 注意力
         x = self.pool3(x)  # [B, 2, 128, 5, 5]
         
         # 展平: 将复数维度和空间维度合并 (与原始一致)

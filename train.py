@@ -143,18 +143,21 @@ def validate(model, val_loader, criterion, device):
 
 
 def train(model_type='standard', epochs=None, lr=None, batch_size=None,
-          train_samples=None, snr_train_range=None, save_best=True):
+          train_samples=None, snr_train_range=None, save_best=True,
+          se_reduction=4, deep_only=False):
     """
     主训练函数
     
     参数:
-        model_type: 模型类型 ('standard' 或 'light')
+        model_type: 模型类型 ('standard', 'light', 'attention', 'cbam', 'far')
         epochs: 训练轮数
         lr: 学习率
         batch_size: 批次大小
         train_samples: 训练样本数
         snr_train_range: 训练SNR范围
         save_best: 是否保存最佳模型
+        se_reduction: SE 模块的通道压缩比 (4, 8, 16)，仅对 attention/cbam 有效
+        deep_only: 是否只在深层使用注意力 (跳过 Block1)，仅对 attention/cbam 有效
     """
     # 参数设置
     epochs = epochs or cfg.epochs
@@ -180,11 +183,11 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     if model_type == 'light':
         model = FDA_CVNN_Light().to(device)
     elif model_type == 'attention':
-        model = FDA_CVNN_Attention(use_cbam=False).to(device)
-        print("使用 SE 通道注意力机制")
+        model = FDA_CVNN_Attention(use_cbam=False, se_reduction=se_reduction, deep_only=deep_only).to(device)
+        print(f"使用 SE 通道注意力机制 (reduction={se_reduction}, deep_only={deep_only})")
     elif model_type == 'cbam':
-        model = FDA_CVNN_Attention(use_cbam=True).to(device)
-        print("使用 CBAM (通道+空间) 注意力机制")
+        model = FDA_CVNN_Attention(use_cbam=True, se_reduction=se_reduction, deep_only=deep_only).to(device)
+        print(f"使用 CBAM (通道+空间) 注意力机制 (reduction={se_reduction}, deep_only={deep_only})")
     elif model_type == 'far':
         model = FDA_CVNN_FAR(far_kernel_size=3).to(device)
         print("使用 FAR (局部特征注意力) 机制 ⭐")

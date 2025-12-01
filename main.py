@@ -168,6 +168,13 @@ def main():
     parser.add_argument('--samples', type=int, default=50000, help='训练样本数')
     parser.add_argument('--batch', type=int, default=512, help='批次大小')
     parser.add_argument('--lr', type=float, default=5e-4, help='学习率')
+    parser.add_argument('--model', type=str, default='standard', 
+                        choices=['standard', 'light', 'attention', 'cbam', 'far'],
+                        help='模型类型: standard(原始), attention(SE), cbam(SE+空间), far(局部注意力)')
+    parser.add_argument('--se_reduction', type=int, default=4, choices=[4, 8, 16],
+                        help='SE模块通道压缩比 (仅对attention/cbam有效)')
+    parser.add_argument('--deep_only', action='store_true',
+                        help='只在深层使用注意力，跳过Block1 (仅对attention/cbam有效)')
     
     args = parser.parse_args()
     
@@ -197,18 +204,24 @@ def main():
         # 正式训练
         from train import train
         train(
-            model_type='standard',
+            model_type=args.model,
             epochs=args.epochs,
             train_samples=args.samples,
             batch_size=args.batch,
-            lr=args.lr
+            lr=args.lr,
+            se_reduction=args.se_reduction,
+            deep_only=args.deep_only
         )
     else:
         # 默认运行测试
         print("\n使用方法:")
         print("  python main.py --test    # 运行所有测试")
         print("  python main.py --quick   # 快速训练测试")
-        print("  python main.py --train   # 正式训练")
+        print("  python main.py --train   # 正式训练 (原始模型)")
+        print("  python main.py --train --model attention  # SE 注意力模型")
+        print("  python main.py --train --model attention --se_reduction 8  # SE reduction=8")
+        print("  python main.py --train --model attention --deep_only  # 只在深层用SE")
+        print("  python main.py --train --model cbam  # CBAM (通道+空间注意力)")
         print("  python main.py --train --epochs 150 --samples 50000 --batch 1024 --lr 5e-4")
 
 
