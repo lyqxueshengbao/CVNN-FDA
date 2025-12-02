@@ -344,15 +344,25 @@ def load_cvnn_model(device, model_path="checkpoints/fda_cvnn_best.pth"):
         if has_se and not has_attn1:
             deep_only = True
         
+        # Dual (SE+FAR) 特征: 同时有 attn*.global_attn.fc 和 attn*.local_attn.conv1
+        has_dual = any('global_attn.fc' in k for k in keys) and any('local_attn.conv1' in k for k in keys)
+        
         # 创建模型
-        if has_far:
-            model = FDA_CVNN_FAR().to(device)
-            print("🔍 检测到 FAR 模型结构 (局部池化注意力)")
+        if has_dual:
+            model = FDA_CVNN_Attention(attention_type='dual', se_reduction=se_reduction, deep_only=deep_only).to(device)
+            print(f"🔍 检测到 PP-DSA 双尺度注意力模型 (SE+FAR) (reduction={se_reduction}, deep_only={deep_only})")
+        elif has_far and has_se:
+            # 同时有 FAR 和 SE 特征，可能是 dual
+            model = FDA_CVNN_Attention(attention_type='dual', se_reduction=se_reduction, deep_only=deep_only).to(device)
+            print(f"🔍 检测到 PP-DSA 双尺度注意力模型 (reduction={se_reduction}, deep_only={deep_only})")
+        elif has_far:
+            model = FDA_CVNN_Attention(attention_type='far', se_reduction=se_reduction, deep_only=deep_only).to(device)
+            print(f"🔍 检测到 FAR 模型结构 (局部池化注意力) (reduction={se_reduction})")
         elif has_cbam:
-            model = FDA_CVNN_Attention(use_cbam=True, se_reduction=se_reduction, deep_only=deep_only).to(device)
+            model = FDA_CVNN_Attention(attention_type='cbam', se_reduction=se_reduction, deep_only=deep_only).to(device)
             print(f"🔍 检测到 CBAM 注意力模型 (reduction={se_reduction}, deep_only={deep_only})")
         elif has_se:
-            model = FDA_CVNN_Attention(use_cbam=False, se_reduction=se_reduction, deep_only=deep_only).to(device)
+            model = FDA_CVNN_Attention(attention_type='se', se_reduction=se_reduction, deep_only=deep_only).to(device)
             print(f"🔍 检测到 SE 注意力模型 (reduction={se_reduction}, deep_only={deep_only})")
         else:
             model = FDA_CVNN().to(device)

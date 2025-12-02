@@ -128,6 +128,7 @@ class ComplexCBAM(nn.Module):
     复数 CBAM (Convolutional Block Attention Module)
     = 通道注意力 + 空间注意力
     
+    注意：使用了 Max Pooling，可能破坏相位干涉特征
     在低 SNR 下，空间注意力可以聚焦于协方差矩阵中的关键区域
     """
     def __init__(self, channels, reduction=4):
@@ -165,6 +166,47 @@ class ComplexCBAM(nn.Module):
         spatial_attn = spatial_attn.unsqueeze(1)  # [B, 1, 1, H, W]
         
         return x * spatial_attn
+
+
+class ComplexDualAttention(nn.Module):
+    """
+    【创新点核心模块】相位保持双尺度注意力 (Phase-Preserving Dual-Scale Attention, PP-DSA)
+    
+    结合了：
+    1. SE (Global Path): 全局平均池化 → 捕捉全孔径相位依赖，保证角度分辨率
+    2. FAR (Local Path): 局部平均池化 → 软阈值去噪，抑制非相干噪声
+    
+    优势：
+    - 全程无 Max Pooling，完美保留复数相位线性叠加特性
+    - SE 提供全局通道校准，FAR 提供局部空间去噪
+    - 串联结构：先全局统筹，再局部精修
+    
+    与 CBAM 的区别：
+    - CBAM 空间注意力使用 Max Pooling，可能破坏相位干涉条纹
+    - 本模块全程使用 Average Pooling，保持相位安全
+    """
+    def __init__(self, channels, reduction=4, far_kernel=3):
+        super().__init__()
+        
+        # 1. 全局路径 (SE Block) - 通道级全局校准
+        self.global_attn = ComplexSEBlock(channels, reduction)
+        
+        # 2. 局部路径 (FAR Block) - 空间级局部去噪
+        self.local_attn = ComplexFARBlock(channels, kernel_size=far_kernel, reduction=reduction)
+        
+    def forward(self, x):
+        """
+        串联结构：先全局统筹 (SE)，再局部精修 (FAR)
+        
+        x: [B, 2, C, H, W]
+        """
+        # 第一步：全局校准 (SE) - 通道重加权
+        x = self.global_attn(x)
+        
+        # 第二步：局部去噪 (FAR) - 空间+通道精修
+        x = self.local_attn(x)
+        
+        return x
 
 
 class FDA_CVNN(nn.Module):
@@ -257,37 +299,53 @@ class FDA_CVNN(nn.Module):
 
 class FDA_CVNN_Attention(nn.Module):
     """
-    保守版注意力 FDA-CVNN
+    带注意力机制的 FDA-CVNN
     
-    设计原则：完全保持原始 FDA_CVNN 的架构，只加入轻量级 SE 注意力
+    设计原则：完全保持原始 FDA_CVNN 的架构，只加入轻量级注意力模块
     - 保持 3 层卷积结构（不加深）
     - 保持 pool3(5) 输出 5x5 特征图（不使用全局池化）
     - 保持相同的全连接层结构
-    - 只在每个卷积块后加入 SE 通道注意力
-    
-    这样既能利用注意力机制抑制噪声通道，又不丢失空间信息
     
     参数:
-        use_cbam: 是否使用 CBAM (通道+空间注意力)，默认 False 使用 SE
-        se_reduction: SE 模块的通道压缩比，默认 4
-                      - 4: 标准配置 (32→8, 64→16, 128→32)
-                      - 8: 更激进压缩，减少过拟合风险
-                      - 16: 最激进，适合小数据集
+        attention_type: 注意力类型
+            - 'se': SE 通道注意力 (全局平均池化)
+            - 'cbam': CBAM (SE + 空间注意力，含 MaxPool，可能破坏相位)
+            - 'far': FAR 局部注意力 (局部平均池化)
+            - 'dual': 【创新】SE + FAR 串联 (相位保持双尺度注意力 PP-DSA)
+        se_reduction: 注意力模块的通道压缩比，默认 4
         deep_only: 是否只在深层使用注意力 (Block2, Block3)，默认 False
+        far_kernel: FAR 局部池化核大小，默认 3
     """
-    def __init__(self, use_cbam=False, se_reduction=4, deep_only=False):
+    def __init__(self, attention_type='se', se_reduction=4, deep_only=False, far_kernel=3,
+                 use_cbam=False):  # use_cbam 保留用于向后兼容
         super().__init__()
-        self.use_cbam = use_cbam
+        
+        # 向后兼容：如果使用旧的 use_cbam 参数
+        if use_cbam:
+            attention_type = 'cbam'
+        
+        self.attention_type = attention_type
         self.se_reduction = se_reduction
         self.deep_only = deep_only
         
-        # Block 1: 100 -> 50 (与原始 FDA_CVNN 完全一致)
+        # 定义注意力构建函数
+        def build_attn(channels):
+            if attention_type == 'cbam':
+                return ComplexCBAM(channels, reduction=se_reduction)
+            elif attention_type == 'far':
+                return ComplexFARBlock(channels, kernel_size=far_kernel, reduction=se_reduction)
+            elif attention_type == 'dual':
+                return ComplexDualAttention(channels, reduction=se_reduction, far_kernel=far_kernel)
+            else:  # 'se' 或默认
+                return ComplexSEBlock(channels, reduction=se_reduction)
+        
+        # Block 1: 100 -> 50
         self.conv1 = ComplexConv2d(1, 32, kernel_size=3, padding=1)
         self.bn1 = ComplexBatchNorm2d(32)
         self.act1 = ModReLU(32, bias_init=-0.5)
         # 浅层注意力可选
         if not deep_only:
-            self.attn1 = ComplexCBAM(32, reduction=se_reduction) if use_cbam else ComplexSEBlock(32, reduction=se_reduction)
+            self.attn1 = build_attn(32)
         else:
             self.attn1 = None
         self.pool1 = ComplexAvgPool2d(2)
@@ -296,25 +354,24 @@ class FDA_CVNN_Attention(nn.Module):
         self.conv2 = ComplexConv2d(32, 64, kernel_size=3, padding=1)
         self.bn2 = ComplexBatchNorm2d(64)
         self.act2 = ModReLU(64, bias_init=-0.5)
-        self.attn2 = ComplexCBAM(64, reduction=se_reduction) if use_cbam else ComplexSEBlock(64, reduction=se_reduction)
+        self.attn2 = build_attn(64)
         self.pool2 = ComplexAvgPool2d(2)
         
-        # Block 3: 25 -> 5 (关键：使用 pool(5) 而不是 pool(2)，保持与原始一致)
+        # Block 3: 25 -> 5
         self.conv3 = ComplexConv2d(64, 128, kernel_size=3, padding=1)
         self.bn3 = ComplexBatchNorm2d(128)
         self.act3 = ModReLU(128, bias_init=-0.5)
-        self.attn3 = ComplexCBAM(128, reduction=se_reduction) if use_cbam else ComplexSEBlock(128, reduction=se_reduction)
-        self.pool3 = ComplexAvgPool2d(5)  # 输出 5x5，与原始一致
+        self.attn3 = build_attn(128)
+        self.pool3 = ComplexAvgPool2d(5)  # 输出 5x5
         
-        # 全连接层 (与原始 FDA_CVNN 完全一致)
-        # 特征图大小: 5x5, 通道128, 实部+虚部
+        # 全连接层
         self.fc_in_dim = 128 * 5 * 5 * 2  # 6400
         
         self.fc1 = nn.Linear(self.fc_in_dim, 512)
         self.fc2 = nn.Linear(512, 128)
         self.fc3 = nn.Linear(128, 2)
         
-        self.dropout = nn.Dropout(0.3)  # 与原始一致
+        self.dropout = nn.Dropout(0.3)
         
     def forward(self, x):
         """
@@ -327,28 +384,28 @@ class FDA_CVNN_Attention(nn.Module):
         x = self.bn1(x)
         x = self.act1(x)
         if self.attn1 is not None:
-            x = self.attn1(x)  # SE 注意力 (浅层可选)
+            x = self.attn1(x)
         x = self.pool1(x)  # [B, 2, 32, 50, 50]
         
         # Block 2
         x = self.conv2(x)
         x = self.bn2(x)
         x = self.act2(x)
-        x = self.attn2(x)  # SE 注意力
+        x = self.attn2(x)
         x = self.pool2(x)  # [B, 2, 64, 25, 25]
         
         # Block 3
         x = self.conv3(x)
         x = self.bn3(x)
         x = self.act3(x)
-        x = self.attn3(x)  # SE 注意力
+        x = self.attn3(x)
         x = self.pool3(x)  # [B, 2, 128, 5, 5]
         
-        # 展平: 将复数维度和空间维度合并 (与原始一致)
+        # 展平
         b = x.shape[0]
-        x = x.view(b, -1)  # [B, 2*128*5*5] = [B, 6400]
+        x = x.view(b, -1)  # [B, 6400]
         
-        # 全连接回归 (与原始一致)
+        # 全连接回归
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
         x = F.relu(self.fc2(x))

@@ -144,20 +144,21 @@ def validate(model, val_loader, criterion, device):
 
 def train(model_type='standard', epochs=None, lr=None, batch_size=None,
           train_samples=None, snr_train_range=None, save_best=True,
-          se_reduction=4, deep_only=False):
+          se_reduction=4, deep_only=False, snapshots=None):
     """
     主训练函数
     
     参数:
-        model_type: 模型类型 ('standard', 'light', 'attention', 'cbam', 'far')
+        model_type: 模型类型 ('standard', 'light', 'attention', 'cbam', 'far', 'dual')
         epochs: 训练轮数
         lr: 学习率
         batch_size: 批次大小
         train_samples: 训练样本数
         snr_train_range: 训练SNR范围
         save_best: 是否保存最佳模型
-        se_reduction: SE 模块的通道压缩比 (4, 8, 16)，仅对 attention/cbam 有效
-        deep_only: 是否只在深层使用注意力 (跳过 Block1)，仅对 attention/cbam 有效
+        se_reduction: SE 模块的通道压缩比 (4, 8, 16)
+        deep_only: 是否只在深层使用注意力 (跳过 Block1)
+        snapshots: 快拍数 L (None 则使用 config.py 中的默认值)
     """
     # 参数设置
     epochs = epochs or cfg.epochs
@@ -167,30 +168,48 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     snr_train_range = snr_train_range or (cfg.snr_train_min, cfg.snr_train_max)
     device = cfg.device
     
+    # 设置快拍数 (动态修改 config)
+    if snapshots is not None:
+        cfg.L_snapshots = snapshots
+    L = cfg.L_snapshots
+    
+    # 动态生成保存路径：包含模型类型和快拍数
+    # 格式: checkpoints/fda_cvnn_{model_type}_L{snapshots}_best.pth
+    if model_type == 'standard':
+        save_name = f"fda_cvnn_L{L}_best.pth"
+    else:
+        save_name = f"fda_cvnn_{model_type}_L{L}_best.pth"
+    save_path = os.path.join(cfg.checkpoint_dir, save_name)
+    
     print("=" * 60)
     print("FDA-CVNN 训练")
     print("=" * 60)
     print(f"设备: {device}")
     print(f"模型: {model_type}")
+    print(f"快拍数: L = {L}")
     print(f"训练样本: {train_samples}")
     print(f"批次大小: {batch_size}")
     print(f"学习率: {lr}")
     print(f"训练轮数: {epochs}")
     print(f"SNR范围: {snr_train_range} dB")
+    print(f"保存路径: {save_path}")
     print("=" * 60)
     
     # 创建模型
     if model_type == 'light':
         model = FDA_CVNN_Light().to(device)
-    elif model_type == 'attention':
-        model = FDA_CVNN_Attention(use_cbam=False, se_reduction=se_reduction, deep_only=deep_only).to(device)
+    elif model_type == 'attention' or model_type == 'se':
+        model = FDA_CVNN_Attention(attention_type='se', se_reduction=se_reduction, deep_only=deep_only).to(device)
         print(f"使用 SE 通道注意力机制 (reduction={se_reduction}, deep_only={deep_only})")
     elif model_type == 'cbam':
-        model = FDA_CVNN_Attention(use_cbam=True, se_reduction=se_reduction, deep_only=deep_only).to(device)
+        model = FDA_CVNN_Attention(attention_type='cbam', se_reduction=se_reduction, deep_only=deep_only).to(device)
         print(f"使用 CBAM (通道+空间) 注意力机制 (reduction={se_reduction}, deep_only={deep_only})")
     elif model_type == 'far':
-        model = FDA_CVNN_FAR(far_kernel_size=3).to(device)
-        print("使用 FAR (局部特征注意力) 机制 ⭐")
+        model = FDA_CVNN_Attention(attention_type='far', se_reduction=se_reduction, deep_only=deep_only).to(device)
+        print(f"使用 FAR 局部注意力机制 (reduction={se_reduction}, deep_only={deep_only})")
+    elif model_type == 'dual':
+        model = FDA_CVNN_Attention(attention_type='dual', se_reduction=se_reduction, deep_only=deep_only).to(device)
+        print(f"使用 PP-DSA 双尺度注意力 (SE+FAR) ⭐ (reduction={se_reduction}, deep_only={deep_only})")
     else:
         model = FDA_CVNN().to(device)
     
@@ -276,12 +295,13 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
                 'model_type': model_type,  # 保存模型类型，便于 benchmark 加载
                 'se_reduction': se_reduction,  # 保存 SE 压缩比
                 'deep_only': deep_only,  # 保存是否只在深层使用注意力
+                'snapshots': L,  # 保存快拍数
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_rmse_r': val_metrics['rmse_r'],
                 'val_rmse_theta': val_metrics['rmse_theta'],
-            }, cfg.model_save_path)
-            print(f"  ★ 保存最佳模型 (RMSE_r: {best_val_rmse_r:.2f}m)")
+            }, save_path)  # 使用动态路径
+            print(f"  ★ 保存最佳模型 (RMSE_r: {best_val_rmse_r:.2f}m) -> {save_name}")
     
     # 训练完成
     total_time = time.time() - start_time
@@ -289,10 +309,12 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     print("训练完成！")
     print(f"总用时: {total_time/60:.1f} 分钟")
     print(f"最佳模型: Epoch {best_epoch}, RMSE_r = {best_val_rmse_r:.2f}m")
+    print(f"保存位置: {save_path}")
     print("=" * 60)
     
-    # 保存训练历史
-    history_path = os.path.join(cfg.checkpoint_dir, 'training_history.json')
+    # 保存训练历史 (包含模型类型和快拍数)
+    history_filename = f"training_history_{model_type}_L{L}.json"
+    history_path = os.path.join(cfg.checkpoint_dir, history_filename)
     # 转换为Python原生类型
     history_serializable = {k: [float(v) for v in vals] for k, vals in history.items()}
     with open(history_path, 'w') as f:
