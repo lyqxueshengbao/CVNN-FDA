@@ -220,8 +220,8 @@ def main():
     elif args.benchmark:
         # 运行对比实验 (自动匹配快拍数对应的模型)
         from benchmark import run_benchmark, plot_results
-        snr_list, results = run_benchmark(L_snapshots=args.snapshots)
-        plot_results(snr_list, results)
+        snr_list, results, L = run_benchmark(L_snapshots=args.snapshots)
+        plot_results(snr_list, results, L_snapshots=L)
         
     else:
         # 默认运行测试

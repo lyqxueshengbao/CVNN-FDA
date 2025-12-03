@@ -613,13 +613,23 @@ def run_benchmark(L_snapshots=None):
         print(f"  {'CRB':<12} {crb_r:>14.3f}   {crb_theta:>14.3f}   {'(bound)':>14}")
         print()
 
-    return snr_list, results
+    return snr_list, results, L  # 返回快拍数
 
 
 # ==========================================
 # 6. 绘图函数
 # ==========================================
-def plot_results(snr_list, results):
+def plot_results(snr_list, results, L_snapshots=None):
+    """
+    绘制并保存对比实验结果
+    
+    Args:
+        snr_list: SNR 列表
+        results: 各算法结果字典
+        L_snapshots: 快拍数 (用于文件命名)
+    """
+    L = L_snapshots or cfg.L_snapshots
+    
     try:
         plt.style.use('seaborn-v0_8-whitegrid')
     except:
@@ -863,13 +873,42 @@ def plot_results(snr_list, results):
     ax6.set_title('Performance Ranking\n(Based on Accuracy)',
                  fontsize=14, fontweight='bold', pad=20)
 
-    plt.tight_layout()
-    plt.savefig('benchmark_final_ultimate.png', dpi=300, bbox_inches='tight')
-    print("\n✅ 图表已保存: benchmark_final_ultimate.png")
+    # 添加总标题，显示快拍数
+    fig.suptitle(f'FDA-MIMO Benchmark Results (L = {L} snapshots)', 
+                 fontsize=18, fontweight='bold', y=1.02)
 
-    # 额外保存高分辨率 PDF
-    plt.savefig('benchmark_final_ultimate.pdf', dpi=300, bbox_inches='tight')
-    print("✅ PDF 版本已保存: benchmark_final_ultimate.pdf")
+    plt.tight_layout()
+    
+    # 保存文件名包含快拍数
+    png_filename = f'results/benchmark_L{L}.png'
+    pdf_filename = f'results/benchmark_L{L}.pdf'
+    json_filename = f'results/benchmark_L{L}.json'
+    
+    # 确保 results 目录存在
+    os.makedirs('results', exist_ok=True)
+    
+    plt.savefig(png_filename, dpi=300, bbox_inches='tight')
+    print(f"\n✅ 图表已保存: {png_filename}")
+
+    plt.savefig(pdf_filename, dpi=300, bbox_inches='tight')
+    print(f"✅ PDF 版本已保存: {pdf_filename}")
+    
+    # 保存数值结果到 JSON
+    import json
+    results_serializable = {
+        'L_snapshots': L,
+        'snr_list': snr_list,
+        'results': {
+            m: {
+                'rmse_r': [float(v) for v in results[m]['rmse_r']],
+                'rmse_theta': [float(v) for v in results[m]['rmse_theta']],
+                'time': [float(v) for v in results[m]['time']]
+            } for m in results.keys()
+        }
+    }
+    with open(json_filename, 'w') as f:
+        json.dump(results_serializable, f, indent=2)
+    print(f"✅ 数值结果已保存: {json_filename}")
 
 
 # ==========================================
