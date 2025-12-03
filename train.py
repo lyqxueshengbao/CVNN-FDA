@@ -144,7 +144,7 @@ def validate(model, val_loader, criterion, device):
 
 def train(model_type='standard', epochs=None, lr=None, batch_size=None,
           train_samples=None, snr_train_range=None, save_best=True,
-          se_reduction=4, deep_only=False, snapshots=None):
+          se_reduction=4, deep_only=False, snapshots=None, random_snapshots=False):
     """
     主训练函数
     
@@ -159,6 +159,7 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         se_reduction: SE 模块的通道压缩比 (4, 8, 16)
         deep_only: 是否只在深层使用注意力 (跳过 Block1)
         snapshots: 快拍数 L (None 则使用 config.py 中的默认值)
+        random_snapshots: 是否随机化快拍数训练 (提高对不同快拍数的鲁棒性)
     """
     # 参数设置
     epochs = epochs or cfg.epochs
@@ -173,12 +174,22 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         cfg.L_snapshots = snapshots
     L = cfg.L_snapshots
     
+    # 快拍数随机化范围
+    L_range = None
+    if random_snapshots:
+        L_range = (1, 100)  # 训练时快拍数从 1 到 100 随机
+        L_str = f"random({L_range[0]}-{L_range[1]})"
+        save_suffix = "Lrandom"
+    else:
+        L_str = str(L)
+        save_suffix = f"L{L}"
+    
     # 动态生成保存路径：包含模型类型和快拍数
     # 格式: checkpoints/fda_cvnn_{model_type}_L{snapshots}_best.pth
     if model_type == 'standard':
-        save_name = f"fda_cvnn_L{L}_best.pth"
+        save_name = f"fda_cvnn_{save_suffix}_best.pth"
     else:
-        save_name = f"fda_cvnn_{model_type}_L{L}_best.pth"
+        save_name = f"fda_cvnn_{model_type}_{save_suffix}_best.pth"
     save_path = os.path.join(cfg.checkpoint_dir, save_name)
     
     print("=" * 60)
@@ -186,7 +197,7 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     print("=" * 60)
     print(f"设备: {device}")
     print(f"模型: {model_type}")
-    print(f"快拍数: L = {L}")
+    print(f"快拍数: L = {L_str}" + (" ⭐ 随机化训练" if random_snapshots else ""))
     print(f"训练样本: {train_samples}")
     print(f"批次大小: {batch_size}")
     print(f"学习率: {lr}")
@@ -230,7 +241,8 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         batch_size=batch_size,
         num_samples=train_samples,
         snr_range=snr_train_range,
-        device=device
+        device=device,
+        L_range=L_range  # 快拍数随机化
     )
     
     # 优化器和损失函数

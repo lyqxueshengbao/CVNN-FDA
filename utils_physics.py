@@ -6,7 +6,7 @@ import torch
 import config as cfg
 
 
-def generate_batch_torch(batch_size, device=cfg.device, snr_range=None):
+def generate_batch_torch(batch_size, device=cfg.device, snr_range=None, L_range=None):
     """
     在GPU上直接生成批次数据 (极速模式)
     
@@ -14,6 +14,8 @@ def generate_batch_torch(batch_size, device=cfg.device, snr_range=None):
         batch_size: 批次大小
         device: 设备
         snr_range: (min, max) SNR范围
+        L_range: (min, max) 快拍数范围，None则使用固定值 cfg.L_snapshots
+                 设置此参数可训练出对不同快拍数都鲁棒的模型
     
     返回:
         R_tensor: [B, 2, MN, MN]
@@ -26,7 +28,13 @@ def generate_batch_torch(batch_size, device=cfg.device, snr_range=None):
     wavelength = cfg.wavelength
     M = cfg.M
     N = cfg.N
-    L = cfg.L_snapshots
+    
+    # 快拍数：固定值或随机范围
+    if L_range is not None:
+        L_min, L_max = L_range
+        L = np.random.randint(L_min, L_max + 1)  # 随机选择快拍数
+    else:
+        L = cfg.L_snapshots
     
     # 1. 随机生成参数 [B, 1]
     r = torch.rand(batch_size, 1, device=device) * (cfg.r_max - cfg.r_min) + cfg.r_min

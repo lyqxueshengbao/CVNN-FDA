@@ -182,6 +182,8 @@ def main():
                         help='固定信噪比 (用于 --snapshots-benchmark，默认 0 dB)')
     parser.add_argument('--snapshots-benchmark', action='store_true',
                         help='运行快拍数对比实验 (固定 SNR，对比不同快拍数)')
+    parser.add_argument('--random-snapshots', action='store_true',
+                        help='训练时随机化快拍数 (L=1~100)，提高对不同快拍数的鲁棒性')
     
     args = parser.parse_args()
     
@@ -218,7 +220,8 @@ def main():
             lr=args.lr,
             se_reduction=args.se_reduction,
             deep_only=args.deep_only,
-            snapshots=args.snapshots
+            snapshots=args.snapshots,
+            random_snapshots=args.random_snapshots
         )
     
     elif args.benchmark:
@@ -230,7 +233,7 @@ def main():
     elif args.snapshots_benchmark:
         # 运行快拍数对比实验 (固定 SNR)
         from benchmark import run_snapshots_benchmark, plot_snapshots_results
-        L_list = [1, 5, 10, 25, 50, 100]  # 默认快拍数列表
+        L_list = [1, 5, 10, 15, 20, 25]  # 你训练过的快拍数列表
         L_list, results, snr = run_snapshots_benchmark(snr_db=args.snr, L_list=L_list)
         plot_snapshots_results(L_list, results, snr)
         
@@ -253,6 +256,9 @@ def main():
         print("  python main.py --snapshots-benchmark           # 快拍数对比 (SNR=0dB)")
         print("  python main.py --snapshots-benchmark --snr -5  # 快拍数对比 (SNR=-5dB)")
         print("  python main.py --snapshots-benchmark --snr 10  # 快拍数对比 (SNR=10dB)")
+        print("")
+        print("  # 🌟 随机快拍数训练 (提高鲁棒性，一个模型适应所有快拍数)")
+        print("  python main.py --train --model dual --random-snapshots --epochs 300")
 
 
 if __name__ == "__main__":

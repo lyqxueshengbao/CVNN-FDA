@@ -14,16 +14,25 @@ class FastDataLoader:
     极速数据加载器 - 直接在GPU上生成数据
     替代标准的 DataLoader，避免 CPU->GPU 传输瓶颈
     """
-    def __init__(self, batch_size, num_samples, snr_range=None, device=cfg.device):
+    def __init__(self, batch_size, num_samples, snr_range=None, device=cfg.device, L_range=None):
+        """
+        参数:
+            batch_size: 批次大小
+            num_samples: 样本总数
+            snr_range: SNR 范围
+            device: 设备
+            L_range: 快拍数范围 (min, max)，None则使用固定的 cfg.L_snapshots
+        """
         self.batch_size = batch_size
         self.num_samples = num_samples
         self.num_batches = num_samples // batch_size
         self.snr_range = snr_range
         self.device = device
+        self.L_range = L_range
         
     def __iter__(self):
         for _ in range(self.num_batches):
-            yield generate_batch_torch(self.batch_size, self.device, self.snr_range)
+            yield generate_batch_torch(self.batch_size, self.device, self.snr_range, self.L_range)
             
     def __len__(self):
         return self.num_batches
