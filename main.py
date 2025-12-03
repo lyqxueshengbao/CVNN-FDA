@@ -178,6 +178,10 @@ def main():
                         help='只在深层使用注意力，跳过Block1')
     parser.add_argument('--snapshots', type=int, default=None,
                         help='快拍数 L (默认使用 config.py 中的值，如 1, 5, 10, 50)')
+    parser.add_argument('--snr', type=int, default=0,
+                        help='固定信噪比 (用于 --snapshots-benchmark，默认 0 dB)')
+    parser.add_argument('--snapshots-benchmark', action='store_true',
+                        help='运行快拍数对比实验 (固定 SNR，对比不同快拍数)')
     
     args = parser.parse_args()
     
@@ -222,6 +226,13 @@ def main():
         from benchmark import run_benchmark, plot_results
         snr_list, results, L = run_benchmark(L_snapshots=args.snapshots)
         plot_results(snr_list, results, L_snapshots=L)
+    
+    elif args.snapshots_benchmark:
+        # 运行快拍数对比实验 (固定 SNR)
+        from benchmark import run_snapshots_benchmark, plot_snapshots_results
+        L_list = [1, 5, 10, 25, 50, 100]  # 默认快拍数列表
+        L_list, results, snr = run_snapshots_benchmark(snr_db=args.snr, L_list=L_list)
+        plot_snapshots_results(L_list, results, snr)
         
     else:
         # 默认运行测试
@@ -238,6 +249,10 @@ def main():
         print("  python main.py --benchmark                 # 对比实验 (默认快拍数)")
         print("  python main.py --benchmark --snapshots 1   # 单快拍对比实验")
         print("  python main.py --benchmark --snapshots 50  # 50快拍对比实验")
+        print("")
+        print("  python main.py --snapshots-benchmark           # 快拍数对比 (SNR=0dB)")
+        print("  python main.py --snapshots-benchmark --snr -5  # 快拍数对比 (SNR=-5dB)")
+        print("  python main.py --snapshots-benchmark --snr 10  # 快拍数对比 (SNR=10dB)")
 
 
 if __name__ == "__main__":

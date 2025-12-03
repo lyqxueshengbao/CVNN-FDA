@@ -912,6 +912,265 @@ def plot_results(snr_list, results, L_snapshots=None):
 
 
 # ==========================================
+# 7. 快拍数对比实验 (固定 SNR)
+# ==========================================
+def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=50):
+    """
+    固定 SNR，对比不同快拍数下各算法的性能
+    
+    Args:
+        snr_db: 固定的信噪比 (dB)
+        L_list: 快拍数列表，如 [1, 5, 10, 25, 50, 100]
+        num_samples: 每个快拍数下的测试样本数
+    
+    Returns:
+        L_list: 快拍数列表
+        results: 各算法结果字典
+    """
+    if L_list is None:
+        L_list = [1, 5, 10, 25, 50, 100]
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"🚀 使用设备: {device}")
+    print(f"📊 固定 SNR = {snr_db} dB, 测试快拍数: {L_list}")
+    
+    # 传统算法不需要加载模型
+    methods_traditional = ["MUSIC", "ESPRIT", "OMP"]
+    
+    # 搜索网格
+    r_grid = np.linspace(0, cfg.r_max, 100)
+    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, 60)
+    r_grid_omp = np.linspace(0, cfg.r_max, 100)
+    theta_grid_omp = np.linspace(cfg.theta_min, cfg.theta_max, 40)
+    
+    # 结果存储
+    results = {}
+    for m in methods_traditional + ["CVNN", "CRB"]:
+        results[m] = {"rmse_r": [], "rmse_theta": [], "time": []}
+    
+    print(f"\n{'='*70}")
+    print(f"📊 快拍数对比实验 (SNR = {snr_db} dB)")
+    print(f"{'='*70}\n")
+    
+    for L in L_list:
+        print(f"📡 L = {L} 快拍", end=" ")
+        
+        # 设置当前快拍数
+        cfg.L_snapshots = L
+        
+        # 尝试加载对应快拍数的 CVNN 模型
+        cvnn = load_cvnn_model(device, L_snapshots=L)
+        cvnn.eval()
+        
+        errors = {m: {"r": [], "theta": [], "time": []} for m in methods_traditional + ["CVNN"]}
+        
+        for sample_idx in tqdm(range(num_samples), desc=f"L={L}", leave=False):
+            r_true = np.random.uniform(0, cfg.r_max)
+            theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
+            R = generate_covariance_matrix(r_true, theta_true, snr_db)
+            R_complex = R[0] + 1j * R[1]
+            
+            # CVNN
+            t0 = time.time()
+            R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device)
+            with torch.no_grad():
+                pred = cvnn(R_tensor).cpu().numpy()[0]
+            r_pred = pred[0] * cfg.r_max
+            theta_pred = pred[1] * (cfg.theta_max - cfg.theta_min) + cfg.theta_min
+            t1 = time.time()
+            errors["CVNN"]["r"].append((r_pred - r_true)**2)
+            errors["CVNN"]["theta"].append((theta_pred - theta_true)**2)
+            errors["CVNN"]["time"].append(t1 - t0)
+            
+            # MUSIC
+            t0 = time.time()
+            r_pred, theta_pred = music_2d_refined(R_complex, r_grid, theta_grid, refine=True)
+            t1 = time.time()
+            errors["MUSIC"]["r"].append((r_pred - r_true)**2)
+            errors["MUSIC"]["theta"].append((theta_pred - theta_true)**2)
+            errors["MUSIC"]["time"].append(t1 - t0)
+            
+            # ESPRIT
+            t0 = time.time()
+            r_pred, theta_pred = esprit_2d_robust(R_complex, cfg.M, cfg.N)
+            t1 = time.time()
+            errors["ESPRIT"]["r"].append((r_pred - r_true)**2)
+            errors["ESPRIT"]["theta"].append((theta_pred - theta_true)**2)
+            errors["ESPRIT"]["time"].append(t1 - t0)
+            
+            # OMP
+            t0 = time.time()
+            r_pred, theta_pred = omp_2d(R_complex, r_grid_omp, theta_grid_omp)
+            t1 = time.time()
+            errors["OMP"]["r"].append((r_pred - r_true)**2)
+            errors["OMP"]["theta"].append((theta_pred - theta_true)**2)
+            errors["OMP"]["time"].append(t1 - t0)
+        
+        # 计算 RMSE
+        for m in methods_traditional + ["CVNN"]:
+            rmse_r = np.sqrt(np.mean(errors[m]["r"]))
+            rmse_theta = np.sqrt(np.mean(errors[m]["theta"]))
+            avg_time = np.mean(errors[m]["time"])
+            
+            results[m]["rmse_r"].append(rmse_r)
+            results[m]["rmse_theta"].append(rmse_theta)
+            results[m]["time"].append(avg_time)
+        
+        # 计算 CRB
+        crb_r, crb_theta = compute_crb_average(snr_db, L=L, num_samples=20)
+        results["CRB"]["rmse_r"].append(crb_r)
+        results["CRB"]["rmse_theta"].append(crb_theta)
+        results["CRB"]["time"].append(0)
+        
+        # 打印结果
+        print(f"\n  {'Method':<12} {'RMSE_r (m)':>14} {'RMSE_θ (°)':>14} {'Time (ms)':>14}")
+        print(f"  {'-'*56}")
+        for m in methods_traditional + ["CVNN"]:
+            rmse_r = results[m]["rmse_r"][-1]
+            rmse_theta = results[m]["rmse_theta"][-1]
+            avg_time = results[m]["time"][-1] * 1000
+            print(f"  {m:<12} {rmse_r:>14.3f} {rmse_theta:>14.3f} {avg_time:>14.2f}")
+        print(f"  {'CRB':<12} {crb_r:>14.3f} {crb_theta:>14.3f} {'(bound)':>14}")
+        print()
+    
+    return L_list, results, snr_db
+
+
+def plot_snapshots_results(L_list, results, snr_db):
+    """
+    绘制快拍数对比结果
+    
+    Args:
+        L_list: 快拍数列表
+        results: 各算法结果字典
+        snr_db: 固定的信噪比
+    """
+    try:
+        plt.style.use('seaborn-v0_8-whitegrid')
+    except:
+        pass
+    
+    methods = [m for m in results.keys() if m != "CRB"]
+    colors = {
+        'CVNN': '#1f77b4',
+        'MUSIC': '#d62728',
+        'ESPRIT': '#ff7f0e',
+        'OMP': '#9467bd'
+    }
+    markers = {
+        'CVNN': 'o',
+        'MUSIC': 's',
+        'ESPRIT': 'd',
+        'OMP': 'v'
+    }
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # 图1: 距离精度 vs 快拍数
+    ax1 = axes[0]
+    for m in methods:
+        if m == "ESPRIT" and np.mean(results[m]["rmse_r"]) > 500:
+            continue
+        ax1.plot(L_list, results[m]["rmse_r"],
+                 color=colors.get(m, 'gray'),
+                 marker=markers.get(m, 'x'),
+                 label=m,
+                 linewidth=2.5,
+                 markersize=9,
+                 alpha=0.9)
+    ax1.plot(L_list, results["CRB"]["rmse_r"],
+             'k--', label='CRB', linewidth=3, alpha=0.6)
+    ax1.set_xlabel('Number of Snapshots (L)', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('RMSE Range (m)', fontsize=14, fontweight='bold')
+    ax1.set_title(f'Range Estimation (SNR = {snr_db} dB)', fontsize=16, fontweight='bold')
+    ax1.set_xscale('log')
+    ax1.set_yscale('log')
+    ax1.grid(True, alpha=0.3, linestyle='--', which='both')
+    ax1.legend(fontsize=11, loc='best')
+    ax1.set_xticks(L_list)
+    ax1.set_xticklabels([str(l) for l in L_list])
+    
+    # 图2: 角度精度 vs 快拍数
+    ax2 = axes[1]
+    for m in methods:
+        ax2.plot(L_list, results[m]["rmse_theta"],
+                 color=colors.get(m, 'gray'),
+                 marker=markers.get(m, 'x'),
+                 label=m,
+                 linewidth=2.5,
+                 markersize=9,
+                 alpha=0.9)
+    ax2.plot(L_list, results["CRB"]["rmse_theta"],
+             'k--', label='CRB', linewidth=3, alpha=0.6)
+    ax2.set_xlabel('Number of Snapshots (L)', fontsize=14, fontweight='bold')
+    ax2.set_ylabel('RMSE Angle (°)', fontsize=14, fontweight='bold')
+    ax2.set_title(f'Angle Estimation (SNR = {snr_db} dB)', fontsize=16, fontweight='bold')
+    ax2.set_xscale('log')
+    ax2.set_yscale('log')
+    ax2.grid(True, alpha=0.3, linestyle='--', which='both')
+    ax2.legend(fontsize=11, loc='best')
+    ax2.set_xticks(L_list)
+    ax2.set_xticklabels([str(l) for l in L_list])
+    
+    # 图3: 相对 CRB 的性能 (距离)
+    ax3 = axes[2]
+    for m in methods:
+        if m == "ESPRIT" and np.mean(results[m]["rmse_r"]) > 500:
+            continue
+        ratio = np.array(results[m]["rmse_r"]) / np.array(results["CRB"]["rmse_r"])
+        ax3.plot(L_list, ratio,
+                 color=colors.get(m, 'gray'),
+                 marker=markers.get(m, 'x'),
+                 label=m,
+                 linewidth=2.5,
+                 markersize=9,
+                 alpha=0.9)
+    ax3.axhline(y=1, color='k', linestyle='--', linewidth=2.5, alpha=0.6, label='CRB')
+    ax3.set_xlabel('Number of Snapshots (L)', fontsize=14, fontweight='bold')
+    ax3.set_ylabel('RMSE / CRB', fontsize=14, fontweight='bold')
+    ax3.set_title(f'Distance to Optimality (SNR = {snr_db} dB)', fontsize=16, fontweight='bold')
+    ax3.set_xscale('log')
+    ax3.set_yscale('log')
+    ax3.grid(True, alpha=0.3, linestyle='--', which='both')
+    ax3.legend(fontsize=11, loc='best')
+    ax3.set_xticks(L_list)
+    ax3.set_xticklabels([str(l) for l in L_list])
+    
+    plt.suptitle(f'Performance vs Number of Snapshots (SNR = {snr_db} dB)', 
+                 fontsize=18, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    
+    # 保存文件
+    os.makedirs('results', exist_ok=True)
+    png_filename = f'results/benchmark_snapshots_SNR{snr_db}dB.png'
+    pdf_filename = f'results/benchmark_snapshots_SNR{snr_db}dB.pdf'
+    json_filename = f'results/benchmark_snapshots_SNR{snr_db}dB.json'
+    
+    plt.savefig(png_filename, dpi=300, bbox_inches='tight')
+    print(f"\n✅ 图表已保存: {png_filename}")
+    
+    plt.savefig(pdf_filename, dpi=300, bbox_inches='tight')
+    print(f"✅ PDF 版本已保存: {pdf_filename}")
+    
+    # 保存数值结果
+    import json
+    results_serializable = {
+        'snr_db': snr_db,
+        'L_list': L_list,
+        'results': {
+            m: {
+                'rmse_r': [float(v) for v in results[m]['rmse_r']],
+                'rmse_theta': [float(v) for v in results[m]['rmse_theta']],
+                'time': [float(v) for v in results[m]['time']]
+            } for m in results.keys()
+        }
+    }
+    with open(json_filename, 'w') as f:
+        json.dump(results_serializable, f, indent=2)
+    print(f"✅ 数值结果已保存: {json_filename}")
+
+
+# ==========================================
 # 主函数
 # ==========================================
 if __name__ == "__main__":
