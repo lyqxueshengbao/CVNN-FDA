@@ -283,15 +283,16 @@ def omp_2d(R, r_grid, theta_grid, K=1):
 # ==========================================
 # 5. 运行对比实验
 # ==========================================
-def find_best_model_path(L_snapshots=None, model_type=None):
+def find_best_model_path(L_snapshots=None, model_type=None, use_random_model=False):
     """
     根据快拍数和模型类型自动查找最佳模型路径
     
     搜索顺序:
-    1. checkpoints/fda_cvnn_{model_type}_L{L}_best.pth (精确匹配)
-    2. checkpoints/fda_cvnn_L{L}_best.pth (标准模型)
-    3. checkpoints/fda_cvnn_{model_type}_best.pth (无快拍后缀)
-    4. checkpoints/fda_cvnn_best.pth (默认)
+    1. 如果 use_random_model=True，优先查找 Lrandom 模型
+    2. checkpoints/fda_cvnn_{model_type}_L{L}_best.pth (精确匹配)
+    3. checkpoints/fda_cvnn_L{L}_best.pth (标准模型)
+    4. checkpoints/fda_cvnn_{model_type}_Lrandom_best.pth (通用模型)
+    5. checkpoints/fda_cvnn_best.pth (默认)
     
     Returns:
         str: 找到的模型路径
@@ -304,6 +305,12 @@ def find_best_model_path(L_snapshots=None, model_type=None):
     # 候选路径列表 (按优先级排序)
     candidates = []
     
+    # 0. 如果指定使用随机模型，优先查找 Lrandom
+    if use_random_model:
+        if model_type and model_type != 'standard':
+            candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_Lrandom_best.pth")
+        candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
+    
     # 1. 精确匹配: fda_cvnn_{type}_L{L}_best.pth
     if model_type and model_type != 'standard':
         candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_L{L}_best.pth")
@@ -311,14 +318,19 @@ def find_best_model_path(L_snapshots=None, model_type=None):
     # 2. 标准模型: fda_cvnn_L{L}_best.pth
     candidates.append(f"{checkpoint_dir}/fda_cvnn_L{L}_best.pth")
     
-    # 3. 无快拍后缀的注意力模型
+    # 3. Lrandom 通用模型作为后备
+    if model_type and model_type != 'standard':
+        candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_Lrandom_best.pth")
+    candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
+    
+    # 4. 无快拍后缀的注意力模型
     if model_type and model_type != 'standard':
         candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_best.pth")
     
-    # 4. 默认路径
+    # 5. 默认路径
     candidates.append(f"{checkpoint_dir}/fda_cvnn_best.pth")
     
-    # 5. 自动搜索匹配快拍数的任意模型
+    # 6. 自动搜索匹配快拍数的任意模型
     pattern = f"{checkpoint_dir}/fda_cvnn_*_L{L}_best.pth"
     matched_files = glob.glob(pattern)
     if matched_files:
@@ -333,7 +345,7 @@ def find_best_model_path(L_snapshots=None, model_type=None):
     return f"{checkpoint_dir}/fda_cvnn_best.pth"
 
 
-def load_cvnn_model(device, model_path=None, L_snapshots=None):
+def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=False):
     """
     智能加载 CVNN 模型，自动检测模型类型和参数配置
     
@@ -341,6 +353,7 @@ def load_cvnn_model(device, model_path=None, L_snapshots=None):
         device: 计算设备
         model_path: 模型路径 (None 则自动查找)
         L_snapshots: 快拍数 (用于自动查找匹配的模型)
+        use_random_model: 是否优先使用 Lrandom 通用模型
     
     支持的模型类型:
     - FDA_CVNN: 标准 CVNN (无注意力模块)
@@ -350,7 +363,7 @@ def load_cvnn_model(device, model_path=None, L_snapshots=None):
     """
     # 自动查找模型路径
     if model_path is None:
-        model_path = find_best_model_path(L_snapshots)
+        model_path = find_best_model_path(L_snapshots, use_random_model=use_random_model)
         print(f"🔍 自动选择模型: {model_path}")
     
     if not os.path.exists(model_path):
@@ -914,7 +927,7 @@ def plot_results(snr_list, results, L_snapshots=None):
 # ==========================================
 # 7. 快拍数对比实验 (固定 SNR)
 # ==========================================
-def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=50):
+def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=50, use_random_model=False):
     """
     固定 SNR，对比不同快拍数下各算法的性能
     
@@ -922,6 +935,7 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=50):
         snr_db: 固定的信噪比 (dB)
         L_list: 快拍数列表，如 [1, 5, 10, 25, 50, 100]
         num_samples: 每个快拍数下的测试样本数
+        use_random_model: 是否使用 Lrandom 通用模型 (一个模型测所有快拍数)
     
     Returns:
         L_list: 快拍数列表
@@ -933,6 +947,8 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=50):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 使用设备: {device}")
     print(f"📊 固定 SNR = {snr_db} dB, 测试快拍数: {L_list}")
+    if use_random_model:
+        print(f"🎯 使用通用模型 (Lrandom) 测试所有快拍数")
     
     # 传统算法不需要加载模型
     methods_traditional = ["MUSIC", "ESPRIT", "OMP"]
@@ -952,15 +968,21 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=50):
     print(f"📊 快拍数对比实验 (SNR = {snr_db} dB)")
     print(f"{'='*70}\n")
     
+    # 如果使用通用模型，只加载一次
+    if use_random_model:
+        cvnn = load_cvnn_model(device, use_random_model=True)
+        cvnn.eval()
+    
     for L in L_list:
         print(f"📡 L = {L} 快拍", end=" ")
         
         # 设置当前快拍数
         cfg.L_snapshots = L
         
-        # 尝试加载对应快拍数的 CVNN 模型
-        cvnn = load_cvnn_model(device, L_snapshots=L)
-        cvnn.eval()
+        # 如果不是通用模型，每个快拍数加载对应模型
+        if not use_random_model:
+            cvnn = load_cvnn_model(device, L_snapshots=L)
+            cvnn.eval()
         
         errors = {m: {"r": [], "theta": [], "time": []} for m in methods_traditional + ["CVNN"]}
         

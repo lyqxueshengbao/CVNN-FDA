@@ -184,6 +184,8 @@ def main():
                         help='运行快拍数对比实验 (固定 SNR，对比不同快拍数)')
     parser.add_argument('--random-snapshots', action='store_true',
                         help='训练时随机化快拍数 (L=1~100)，提高对不同快拍数的鲁棒性')
+    parser.add_argument('--use-random-model', action='store_true',
+                        help='测试时使用 Lrandom 通用模型 (一个模型测所有快拍数)')
     
     args = parser.parse_args()
     
@@ -233,8 +235,17 @@ def main():
     elif args.snapshots_benchmark:
         # 运行快拍数对比实验 (固定 SNR)
         from benchmark import run_snapshots_benchmark, plot_snapshots_results
-        L_list = [1, 5, 10, 15, 20, 25]  # 你训练过的快拍数列表
-        L_list, results, snr = run_snapshots_benchmark(snr_db=args.snr, L_list=L_list)
+        if args.use_random_model:
+            # 使用通用模型，可以测更大范围的快拍数
+            L_list = [1, 5, 10, 25, 50, 100]
+        else:
+            # 使用各自训练的模型
+            L_list = [1, 5, 10, 15, 20, 25]  # 你训练过的快拍数列表
+        L_list, results, snr = run_snapshots_benchmark(
+            snr_db=args.snr, 
+            L_list=L_list,
+            use_random_model=args.use_random_model
+        )
         plot_snapshots_results(L_list, results, snr)
         
     else:
