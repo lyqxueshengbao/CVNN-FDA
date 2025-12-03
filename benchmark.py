@@ -283,9 +283,64 @@ def omp_2d(R, r_grid, theta_grid, K=1):
 # ==========================================
 # 5. 运行对比实验
 # ==========================================
-def load_cvnn_model(device, model_path="checkpoints/fda_cvnn_best.pth"):
+def find_best_model_path(L_snapshots=None, model_type=None):
+    """
+    根据快拍数和模型类型自动查找最佳模型路径
+    
+    搜索顺序:
+    1. checkpoints/fda_cvnn_{model_type}_L{L}_best.pth (精确匹配)
+    2. checkpoints/fda_cvnn_L{L}_best.pth (标准模型)
+    3. checkpoints/fda_cvnn_{model_type}_best.pth (无快拍后缀)
+    4. checkpoints/fda_cvnn_best.pth (默认)
+    
+    Returns:
+        str: 找到的模型路径
+    """
+    import glob
+    
+    L = L_snapshots or cfg.L_snapshots
+    checkpoint_dir = cfg.checkpoint_dir
+    
+    # 候选路径列表 (按优先级排序)
+    candidates = []
+    
+    # 1. 精确匹配: fda_cvnn_{type}_L{L}_best.pth
+    if model_type and model_type != 'standard':
+        candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_L{L}_best.pth")
+    
+    # 2. 标准模型: fda_cvnn_L{L}_best.pth
+    candidates.append(f"{checkpoint_dir}/fda_cvnn_L{L}_best.pth")
+    
+    # 3. 无快拍后缀的注意力模型
+    if model_type and model_type != 'standard':
+        candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_best.pth")
+    
+    # 4. 默认路径
+    candidates.append(f"{checkpoint_dir}/fda_cvnn_best.pth")
+    
+    # 5. 自动搜索匹配快拍数的任意模型
+    pattern = f"{checkpoint_dir}/fda_cvnn_*_L{L}_best.pth"
+    matched_files = glob.glob(pattern)
+    if matched_files:
+        candidates = matched_files + candidates
+    
+    # 返回第一个存在的文件
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    
+    # 如果都不存在，返回默认路径
+    return f"{checkpoint_dir}/fda_cvnn_best.pth"
+
+
+def load_cvnn_model(device, model_path=None, L_snapshots=None):
     """
     智能加载 CVNN 模型，自动检测模型类型和参数配置
+    
+    Args:
+        device: 计算设备
+        model_path: 模型路径 (None 则自动查找)
+        L_snapshots: 快拍数 (用于自动查找匹配的模型)
     
     支持的模型类型:
     - FDA_CVNN: 标准 CVNN (无注意力模块)
@@ -293,6 +348,11 @@ def load_cvnn_model(device, model_path="checkpoints/fda_cvnn_best.pth"):
     - FDA_CVNN_Attention (CBAM): 有 channel_attn 层
     - FDA_CVNN_FAR: 有 attn*.conv1.conv_rr.* 层 (复数卷积做注意力)
     """
+    # 自动查找模型路径
+    if model_path is None:
+        model_path = find_best_model_path(L_snapshots)
+        print(f"🔍 自动选择模型: {model_path}")
+    
     if not os.path.exists(model_path):
         print(f"⚠️  模型文件不存在: {model_path}")
         return FDA_CVNN().to(device)
@@ -306,6 +366,9 @@ def load_cvnn_model(device, model_path="checkpoints/fda_cvnn_best.pth"):
             model_type = checkpoint.get('model_type', None)
             se_reduction = checkpoint.get('se_reduction', None)
             deep_only = checkpoint.get('deep_only', False)
+            saved_snapshots = checkpoint.get('snapshots', None)
+            if saved_snapshots:
+                print(f"📌 模型训练时快拍数: L = {saved_snapshots}")
         else:
             state_dict = checkpoint
             model_type = None
@@ -379,12 +442,24 @@ def load_cvnn_model(device, model_path="checkpoints/fda_cvnn_best.pth"):
         return FDA_CVNN().to(device)
 
 
-def run_benchmark():
+def run_benchmark(L_snapshots=None):
+    """
+    运行对比实验
+    
+    Args:
+        L_snapshots: 快拍数 (None 则使用 config.py 中的默认值)
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 使用设备: {device}")
+    
+    # 设置快拍数
+    if L_snapshots is not None:
+        cfg.L_snapshots = L_snapshots
+    L = cfg.L_snapshots
+    print(f"📊 当前快拍数: L = {L}")
 
-    # 智能加载 CVNN 模型
-    cvnn = load_cvnn_model(device)
+    # 智能加载 CVNN 模型 (根据快拍数自动匹配)
+    cvnn = load_cvnn_model(device, L_snapshots=L)
     cvnn.eval()
 
     real_cnn = RealCNN().to(device)

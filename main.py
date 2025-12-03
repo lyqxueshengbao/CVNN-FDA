@@ -163,6 +163,7 @@ def main():
     parser = argparse.ArgumentParser(description='FDA-CVNN 项目入口')
     parser.add_argument('--test', action='store_true', help='运行所有测试')
     parser.add_argument('--train', action='store_true', help='开始训练')
+    parser.add_argument('--benchmark', action='store_true', help='运行对比实验')
     parser.add_argument('--quick', action='store_true', help='快速训练测试')
     parser.add_argument('--epochs', type=int, default=150, help='训练轮数')
     parser.add_argument('--samples', type=int, default=50000, help='训练样本数')
@@ -215,6 +216,13 @@ def main():
             deep_only=args.deep_only,
             snapshots=args.snapshots
         )
+    
+    elif args.benchmark:
+        # 运行对比实验 (自动匹配快拍数对应的模型)
+        from benchmark import run_benchmark, plot_results
+        snr_list, results = run_benchmark(L_snapshots=args.snapshots)
+        plot_results(snr_list, results)
+        
     else:
         # 默认运行测试
         print("\n使用方法:")
@@ -226,6 +234,10 @@ def main():
         print("  python main.py --train --model se --snapshots 10    # 10快拍 SE 模型")
         print("  python main.py --train --model dual --se_reduction 8  # reduction=8")
         print("  python main.py --train --epochs 300 --samples 50000 --batch 64 --lr 1e-4")
+        print("")
+        print("  python main.py --benchmark                 # 对比实验 (默认快拍数)")
+        print("  python main.py --benchmark --snapshots 1   # 单快拍对比实验")
+        print("  python main.py --benchmark --snapshots 50  # 50快拍对比实验")
 
 
 if __name__ == "__main__":
