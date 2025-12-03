@@ -305,36 +305,46 @@ def find_best_model_path(L_snapshots=None, model_type=None, use_random_model=Fal
     # 候选路径列表 (按优先级排序)
     candidates = []
     
-    # 0. 如果指定使用随机模型，优先查找 Lrandom
+    # 0. 如果指定使用随机模型，优先查找 Lrandom (搜索所有类型)
     if use_random_model:
-        if model_type and model_type != 'standard':
-            candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_Lrandom_best.pth")
+        # 先搜索所有 Lrandom 模型
+        pattern_random = f"{checkpoint_dir}/fda_cvnn_*_Lrandom_best.pth"
+        random_models = glob.glob(pattern_random)
+        if random_models:
+            candidates.extend(random_models)
+        # 也添加标准的 Lrandom
         candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
+        # 如果找到 Lrandom 模型，直接返回第一个
+        for path in candidates:
+            if os.path.exists(path):
+                return path
     
     # 1. 精确匹配: fda_cvnn_{type}_L{L}_best.pth
     if model_type and model_type != 'standard':
         candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_L{L}_best.pth")
     
-    # 2. 标准模型: fda_cvnn_L{L}_best.pth
-    candidates.append(f"{checkpoint_dir}/fda_cvnn_L{L}_best.pth")
-    
-    # 3. Lrandom 通用模型作为后备
-    if model_type and model_type != 'standard':
-        candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_Lrandom_best.pth")
-    candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
-    
-    # 4. 无快拍后缀的注意力模型
-    if model_type and model_type != 'standard':
-        candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_best.pth")
-    
-    # 5. 默认路径
-    candidates.append(f"{checkpoint_dir}/fda_cvnn_best.pth")
-    
-    # 6. 自动搜索匹配快拍数的任意模型
+    # 2. 自动搜索匹配快拍数的任意模型
     pattern = f"{checkpoint_dir}/fda_cvnn_*_L{L}_best.pth"
     matched_files = glob.glob(pattern)
     if matched_files:
-        candidates = matched_files + candidates
+        candidates.extend(matched_files)
+    
+    # 3. 标准模型: fda_cvnn_L{L}_best.pth
+    candidates.append(f"{checkpoint_dir}/fda_cvnn_L{L}_best.pth")
+    
+    # 4. Lrandom 通用模型作为后备
+    pattern_random = f"{checkpoint_dir}/fda_cvnn_*_Lrandom_best.pth"
+    random_models = glob.glob(pattern_random)
+    if random_models:
+        candidates.extend(random_models)
+    candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
+    
+    # 5. 无快拍后缀的注意力模型
+    if model_type and model_type != 'standard':
+        candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_best.pth")
+    
+    # 6. 默认路径
+    candidates.append(f"{checkpoint_dir}/fda_cvnn_best.pth")
     
     # 返回第一个存在的文件
     for path in candidates:
