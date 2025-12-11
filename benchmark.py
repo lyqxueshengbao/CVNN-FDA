@@ -157,9 +157,9 @@ def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
     theta_step = theta_search_coarse[1] - theta_search_coarse[0] if len(theta_search_coarse) > 1 else 2
 
     r_fine = np.linspace(max(0, best_r - r_step),
-                         min(cfg.r_max, best_r + r_step), 41)
+                         min(cfg.r_max, best_r + r_step), 21)  # 21点细搜索
     theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step),
-                             min(cfg.theta_max, best_theta + theta_step), 41)
+                             min(cfg.theta_max, best_theta + theta_step), 21)  # 21点细搜索
 
     max_p = -1
     for r in r_fine:
@@ -280,11 +280,11 @@ def omp_2d_refined(R, r_grid_coarse, theta_grid_coarse, refine=True):
     r_step = r_grid_coarse[1] - r_grid_coarse[0] if len(r_grid_coarse) > 1 else 100
     theta_step = theta_grid_coarse[1] - theta_grid_coarse[0] if len(theta_grid_coarse) > 1 else 2
 
-    # 生成细网格 (40个点)
+    # 生成细网格 (21个点)
     r_fine = np.linspace(max(0, best_r - r_step), 
-                         min(cfg.r_max, best_r + r_step), 41)
+                         min(cfg.r_max, best_r + r_step), 21)
     theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step), 
-                             min(cfg.theta_max, best_theta + theta_step), 41)
+                             min(cfg.theta_max, best_theta + theta_step), 21)
 
     best_r_fine, best_theta_fine = find_best_atom(r_fine, theta_fine)
 
@@ -362,13 +362,14 @@ def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=
 # ==========================================
 # 5. 运行对比实验
 # ==========================================
-def run_benchmark(L_snapshots=None, num_samples=500):
+def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False):
     """
     运行 SNR 对比实验
     
     Args:
         L_snapshots: 快拍数
         num_samples: 每个 SNR 下的测试样本数 (默认 500)
+        fast_mode: 快速模式，只测神经网络方法 (GPU 利用率高)
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 使用设备: {device}")
@@ -377,6 +378,8 @@ def run_benchmark(L_snapshots=None, num_samples=500):
     L = cfg.L_snapshots
     print(f"📊 当前快拍数: L = {L}")
     print(f"📊 测试样本数: {num_samples}")
+    if fast_mode:
+        print(f"⚡ 快速模式: 只测试神经网络方法 (GPU 密集)")
 
     cvnn = load_cvnn_model(device, L_snapshots=L)
     cvnn.eval()
@@ -395,15 +398,22 @@ def run_benchmark(L_snapshots=None, num_samples=500):
 
     snr_list = [-10, -5, 0, 5, 10]
 
-    methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
+    # 快速模式只测神经网络
+    if fast_mode:
+        methods = ["CVNN", "Real-CNN"]
+    else:
+        methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
+    
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
 
-    r_grid = np.linspace(0, cfg.r_max, 100)
-    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, 60)
+    # MUSIC/OMP 网格设置 (论文中常用的粗网格)
+    # 注: 网格太细会让传统方法表现过好，掩盖神经网络的优势
+    r_grid = np.linspace(0, cfg.r_max, 40)        # 距离: 40点 (步长50m)
+    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, 30)  # 角度: 30点 (步长2°)
     
-    r_grid_omp = np.linspace(0, cfg.r_max, 80)
-    theta_grid_omp = np.linspace(cfg.theta_min, cfg.theta_max, 40)
+    r_grid_omp = np.linspace(0, cfg.r_max, 40)
+    theta_grid_omp = np.linspace(cfg.theta_min, cfg.theta_max, 30)
 
     print(f"\n{'='*70}\n📊 对比实验开始 (Samples={num_samples})\n{'='*70}")
 

@@ -188,6 +188,8 @@ def main():
                         help='测试时使用 Lrandom 通用模型 (一个模型测所有快拍数)')
     parser.add_argument('--num-samples', type=int, default=500,
                         help='评测时每个条件下的样本数 (默认 500)')
+    parser.add_argument('--fast', action='store_true',
+                        help='快速模式，只测神经网络方法 (GPU利用率高，跳过 MUSIC/ESPRIT/OMP)')
     
     args = parser.parse_args()
     
@@ -231,7 +233,11 @@ def main():
     elif args.benchmark:
         # 运行对比实验 (自动匹配快拍数对应的模型)
         from benchmark import run_benchmark, plot_results
-        snr_list, results, L = run_benchmark(L_snapshots=args.snapshots, num_samples=args.num_samples)
+        snr_list, results, L = run_benchmark(
+            L_snapshots=args.snapshots, 
+            num_samples=args.num_samples,
+            fast_mode=args.fast
+        )
         plot_results(snr_list, results, L_snapshots=L)
     
     elif args.snapshots_benchmark:
