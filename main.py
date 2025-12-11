@@ -236,20 +236,20 @@ def main():
     
     elif args.snapshots_benchmark:
         # 运行快拍数对比实验 (固定 SNR)
-        from benchmark import run_snapshots_benchmark, plot_snapshots_results
+        # 注意: run_snapshots_benchmark 内部已包含绘图并自动保存
+        from benchmark import run_snapshots_benchmark
         if args.use_random_model:
             # 使用通用模型，可以测更大范围的快拍数
             L_list = [1, 5, 10, 25, 50, 100]
         else:
             # 使用各自训练的模型
             L_list = [1, 5, 10, 15, 20, 25]  # 你训练过的快拍数列表
-        L_list, results, snr = run_snapshots_benchmark(
+        run_snapshots_benchmark(
             snr_db=args.snr, 
             L_list=L_list,
             num_samples=args.num_samples,
             use_random_model=args.use_random_model
         )
-        plot_snapshots_results(L_list, results, snr)
         
     else:
         # 默认运行测试
