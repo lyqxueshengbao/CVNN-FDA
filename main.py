@@ -186,6 +186,8 @@ def main():
                         help='训练时随机化快拍数 (L=1~100)，提高对不同快拍数的鲁棒性')
     parser.add_argument('--use-random-model', action='store_true',
                         help='测试时使用 Lrandom 通用模型 (一个模型测所有快拍数)')
+    parser.add_argument('--num-samples', type=int, default=500,
+                        help='评测时每个条件下的样本数 (默认 500)')
     
     args = parser.parse_args()
     
@@ -229,7 +231,7 @@ def main():
     elif args.benchmark:
         # 运行对比实验 (自动匹配快拍数对应的模型)
         from benchmark import run_benchmark, plot_results
-        snr_list, results, L = run_benchmark(L_snapshots=args.snapshots)
+        snr_list, results, L = run_benchmark(L_snapshots=args.snapshots, num_samples=args.num_samples)
         plot_results(snr_list, results, L_snapshots=L)
     
     elif args.snapshots_benchmark:
@@ -244,6 +246,7 @@ def main():
         L_list, results, snr = run_snapshots_benchmark(
             snr_db=args.snr, 
             L_list=L_list,
+            num_samples=args.num_samples,
             use_random_model=args.use_random_model
         )
         plot_snapshots_results(L_list, results, snr)

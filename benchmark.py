@@ -362,13 +362,21 @@ def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=
 # ==========================================
 # 5. 运行对比实验
 # ==========================================
-def run_benchmark(L_snapshots=None):
+def run_benchmark(L_snapshots=None, num_samples=500):
+    """
+    运行 SNR 对比实验
+    
+    Args:
+        L_snapshots: 快拍数
+        num_samples: 每个 SNR 下的测试样本数 (默认 500)
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 使用设备: {device}")
     
     if L_snapshots is not None: cfg.L_snapshots = L_snapshots
     L = cfg.L_snapshots
     print(f"📊 当前快拍数: L = {L}")
+    print(f"📊 测试样本数: {num_samples}")
 
     cvnn = load_cvnn_model(device, L_snapshots=L)
     cvnn.eval()
@@ -386,7 +394,6 @@ def run_benchmark(L_snapshots=None):
     for _ in range(3): cvnn(dummy); real_cnn(dummy)
 
     snr_list = [-10, -5, 0, 5, 10]
-    num_samples = 100
 
     methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
@@ -548,7 +555,7 @@ def plot_results(snr_list, results, L_snapshots=None):
 # ==========================================
 # 7. 快拍数对比实验
 # ==========================================
-def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=50, use_random_model=False):
+def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_model=False):
     if L_list is None: L_list = [1, 5, 10, 25, 50, 100]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*70}\n📊 快拍数对比实验 (SNR={snr_db}dB)\n{'='*70}")
