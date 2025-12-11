@@ -121,56 +121,78 @@ def compute_crb_average(snr_db, L=None, num_samples=200):
 
 
 # ==========================================
-# 1. 改进的 2D-MUSIC (两级搜索)
+# 1. 改进的 2D-MUSIC (向量化 + 两级搜索)
 # ==========================================
 def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
     """
-    两级 MUSIC 算法
+    [标准改进版] 向量化 2D-MUSIC
+    
+    优势: 
+    - 速度极快 (矩阵运算代替 for 循环)
+    - 允许使用细网格，避免漏掉 MUSIC 的尖峰
     """
+    M, N = cfg.M, cfg.N
+    
+    # 1. 特征分解与噪声子空间
     w, v = np.linalg.eigh(R)
-    Un = v[:, :-1]
-
-    def compute_music_spectrum(r, theta):
-        a = get_steering_vector(r, theta)
-        proj = Un.conj().T @ a
-        denom = np.sum(np.abs(proj)**2)
-        return 1.0 / (denom + 1e-12)
-
-    # === 1. 粗搜索 ===
-    max_p = -1
-    best_r = 0
-    best_theta = 0
-
-    for r in r_search_coarse:
-        for theta in theta_search_coarse:
-            spectrum = compute_music_spectrum(r, theta)
-            if spectrum > max_p:
-                max_p = spectrum
-                best_r = r
-                best_theta = theta
-
+    K = 1  # 单目标
+    Un = v[:, :-K]  # (MN, MN-K)
+    
+    # 2. 向量化构建导向矢量字典
+    R_grid, Theta_grid = np.meshgrid(r_search_coarse, theta_search_coarse, indexing='ij')
+    R_flat = R_grid.flatten()
+    Theta_flat = Theta_grid.flatten()
+    
+    m_idx = np.arange(M).reshape(-1, 1)  # (M, 1)
+    n_idx = np.arange(N).reshape(-1, 1)  # (N, 1)
+    Theta_rad = np.deg2rad(Theta_flat)
+    
+    # 发射相位: -4*pi*df*m*r/c + 2*pi*d*m*sin(theta)/lam
+    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c + 
+              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
+    a_tx = np.exp(1j * phi_tx)  # (M, N_grid)
+    
+    # 接收相位: 2*pi*d*n*sin(theta)/lam
+    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
+    a_rx = np.exp(1j * phi_rx)  # (N, N_grid)
+    
+    # Khatri-Rao 积: A[m*N + n, :] = a_tx[m, :] * a_rx[n, :]
+    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
+    
+    # 3. 矩阵化计算谱: P = 1 / sum(|Un^H * A|^2, axis=0)
+    proj = Un.conj().T @ A  # (MN-K, N_grid)
+    spectrum = 1.0 / (np.sum(np.abs(proj)**2, axis=0) + 1e-12)
+    
+    # 4. 找到粗搜索最大值
+    idx = np.argmax(spectrum)
+    best_r = R_flat[idx]
+    best_theta = Theta_flat[idx]
+    
     if not refine:
         return best_r, best_theta
-
-    # === 2. 细搜索 ===
-    r_step = r_search_coarse[1] - r_search_coarse[0] if len(r_search_coarse) > 1 else 50
-    theta_step = theta_search_coarse[1] - theta_search_coarse[0] if len(theta_search_coarse) > 1 else 2
-
-    r_fine = np.linspace(max(0, best_r - r_step),
-                         min(cfg.r_max, best_r + r_step), 21)  # 21点细搜索
-    theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step),
-                             min(cfg.theta_max, best_theta + theta_step), 21)  # 21点细搜索
-
+    
+    # 5. 细搜索 (局部小范围)
+    r_step = (r_search_coarse[-1] - r_search_coarse[0]) / (len(r_search_coarse) - 1) if len(r_search_coarse) > 1 else 50
+    theta_step = (theta_search_coarse[-1] - theta_search_coarse[0]) / (len(theta_search_coarse) - 1) if len(theta_search_coarse) > 1 else 2
+    
+    r_fine = np.linspace(max(0, best_r - r_step/2), 
+                         min(cfg.r_max, best_r + r_step/2), 21)
+    theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step/2), 
+                             min(cfg.theta_max, best_theta + theta_step/2), 21)
+    
+    # 细搜索用简单循环 (点数少)
     max_p = -1
+    refined_r, refined_theta = best_r, best_theta
+    
     for r in r_fine:
-        for theta in theta_fine:
-            spectrum = compute_music_spectrum(r, theta)
-            if spectrum > max_p:
-                max_p = spectrum
-                best_r = r
-                best_theta = theta
-
-    return best_r, best_theta
+        for t in theta_fine:
+            a = get_steering_vector(r, t)
+            p = 1.0 / (np.sum(np.abs(Un.conj().T @ a)**2) + 1e-12)
+            if p > max_p:
+                max_p = p
+                refined_r, refined_theta = r, t
+    
+    return refined_r, refined_theta
 
 
 # ==========================================
@@ -236,59 +258,81 @@ def esprit_2d_robust(R, M, N):
 
 
 # ==========================================
-# 3. OMP (改进版: 粗搜索 + 细搜索)
+# 3. OMP (向量化 + 两级搜索)
 # ==========================================
 def omp_2d_refined(R, r_grid_coarse, theta_grid_coarse, refine=True):
     """
-    [OMP 修复]: 引入两级搜索 (Coarse-to-Fine)
+    [标准修复版] 向量化 OMP
     
-    原版 OMP 只在固定网格上搜索，导致在高 SNR 下误差被网格精度锁死 (呈直线)。
-    改进后，先粗搜找到最大相关点，再在附近细搜，性能随 SNR 提升而提升。
+    区别于 MUSIC:
+    - OMP 基于信号子空间 (最大特征向量)
+    - MUSIC 基于噪声子空间
+    - 在 L=1 单目标时两者数学上近似等价
     """
-    # 获取观测向量 y (取最大特征向量)
+    M, N = cfg.M, cfg.N
+    
+    # 1. 获取观测信号 (取最大特征向量作为信号代理 y)
     w, v = np.linalg.eigh(R)
-    y = v[:, -1] 
-
-    def find_best_atom(r_grid, theta_grid):
-        best_corr = -1
-        best_r = 0
-        best_theta = 0
-        
-        # 遍历网格寻找与信号 y 相关性最大的原子
-        for r in r_grid:
-            for theta in theta_grid:
-                a = get_steering_vector(r, theta)
-                # 归一化原子 (OMP 核心)
-                a_norm = a / (np.linalg.norm(a) + 1e-12)
-                # 计算相关性 (投影绝对值)
-                corr = np.abs(a_norm.conj().T @ y)
-                
-                if corr > best_corr:
-                    best_corr = corr
-                    best_r = r
-                    best_theta = theta
-        return best_r, best_theta
-
-    # === 1. 粗搜索 ===
-    best_r, best_theta = find_best_atom(r_grid_coarse, theta_grid_coarse)
-
+    y = v[:, -1]  # (MN,)
+    
+    # 2. 向量化构建字典矩阵 A
+    R_grid, Theta_grid = np.meshgrid(r_grid_coarse, theta_grid_coarse, indexing='ij')
+    R_flat = R_grid.flatten()
+    Theta_flat = Theta_grid.flatten()
+    
+    m_idx = np.arange(M).reshape(-1, 1)
+    n_idx = np.arange(N).reshape(-1, 1)
+    Theta_rad = np.deg2rad(Theta_flat)
+    
+    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c + 
+              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
+    a_tx = np.exp(1j * phi_tx)
+    
+    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
+    a_rx = np.exp(1j * phi_rx)
+    
+    # 构建字典 A: (MN, N_grid)
+    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
+    
+    # 归一化字典原子 (OMP 关键步骤)
+    A = A / np.sqrt(M*N)
+    
+    # 3. 匹配: correlations = |A^H * y|
+    correlations = np.abs(A.conj().T @ y)
+    
+    # 4. 找到最佳匹配原子
+    idx = np.argmax(correlations)
+    best_r = R_flat[idx]
+    best_theta = Theta_flat[idx]
+    
     if not refine:
         return best_r, best_theta
-
-    # === 2. 细搜索 ===
-    # 确定细搜索范围 (左右各取一个粗步长)
-    r_step = r_grid_coarse[1] - r_grid_coarse[0] if len(r_grid_coarse) > 1 else 100
-    theta_step = theta_grid_coarse[1] - theta_grid_coarse[0] if len(theta_grid_coarse) > 1 else 2
-
-    # 生成细网格 (21个点)
+    
+    # 5. 细搜索 (OMP 的峰值比 MUSIC 更"钝"，细搜效果不如 MUSIC 明显)
+    r_step = (r_grid_coarse[-1] - r_grid_coarse[0]) / (len(r_grid_coarse) - 1) if len(r_grid_coarse) > 1 else 100
+    theta_step = (theta_grid_coarse[-1] - theta_grid_coarse[0]) / (len(theta_grid_coarse) - 1) if len(theta_grid_coarse) > 1 else 2
+    
     r_fine = np.linspace(max(0, best_r - r_step), 
                          min(cfg.r_max, best_r + r_step), 21)
     theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step), 
                              min(cfg.theta_max, best_theta + theta_step), 21)
-
-    best_r_fine, best_theta_fine = find_best_atom(r_fine, theta_fine)
-
-    return best_r_fine, best_theta_fine
+    
+    max_corr = -1
+    refined_r, refined_theta = best_r, best_theta
+    
+    # 导向矢量由纯相位项组成 (e^{jφ})，模长恒定为 sqrt(M*N)，预计算加速
+    norm_factor = np.sqrt(M * N)
+    
+    for r in r_fine:
+        for t in theta_fine:
+            a = get_steering_vector(r, t)
+            # 直接除常数，避免每次循环计算 np.linalg.norm
+            corr = np.abs(a.conj().T @ y) / norm_factor
+            if corr > max_corr:
+                max_corr = corr
+                refined_r, refined_theta = r, t
+    
+    return refined_r, refined_theta
 
 
 # ==========================================
@@ -407,13 +451,31 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False):
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
 
-    # MUSIC/OMP 网格设置 (论文中常用的粗网格)
-    # 注: 网格太细会让传统方法表现过好，掩盖神经网络的优势
-    r_grid = np.linspace(0, cfg.r_max, 40)        # 距离: 40点 (步长50m)
-    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, 30)  # 角度: 30点 (步长2°)
+    # ========================================
+    # 基于物理分辨率的网格设置 (学术标准)
+    # ========================================
+    # 距离分辨率: c / (2 * Bandwidth), Bandwidth = M * delta_f
+    res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
+    # 角度分辨率: lambda / Aperture, Aperture = N * d  
+    res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
     
-    r_grid_omp = np.linspace(0, cfg.r_max, 40)
-    theta_grid_omp = np.linspace(cfg.theta_min, cfg.theta_max, 30)
+    # 粗搜索步长设为分辨率的一半 (Nyquist 采样准则)
+    step_r_coarse = res_r / 2
+    step_theta_coarse = res_theta / 2
+    
+    # 使用物理步长动态生成网格 (避免栅栏效应 Grid Straddling Loss)
+    num_r_points = max(int(cfg.r_max / step_r_coarse) + 1, 50)  # 至少50点
+    num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / step_theta_coarse) + 1, 30)
+    
+    r_grid = np.linspace(0, cfg.r_max, num_r_points)
+    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
+    
+    # OMP: 与 MUSIC 相同网格 (公平对比)
+    r_grid_omp = r_grid
+    theta_grid_omp = theta_grid
+    
+    print(f"\n📐 物理分辨率: Range={res_r:.2f}m, Angle={res_theta:.2f}°")
+    print(f"📐 动态生成网格: {len(r_grid)}×{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点 (基于分辨率/2)")
 
     print(f"\n{'='*70}\n📊 对比实验开始 (Samples={num_samples})\n{'='*70}")
 
@@ -573,10 +635,21 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     methods = ["MUSIC", "ESPRIT", "OMP", "CVNN", "CRB"]
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     
-    r_grid = np.linspace(0, cfg.r_max, 100)
-    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, 60)
-    r_grid_omp = np.linspace(0, cfg.r_max, 80)
-    theta_grid_omp = np.linspace(cfg.theta_min, cfg.theta_max, 40)
+    # 基于物理分辨率动态生成网格 (与 run_benchmark 保持一致)
+    res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
+    res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
+    step_r = res_r / 2
+    step_theta = res_theta / 2
+    
+    num_r_points = max(int(cfg.r_max / step_r) + 1, 50)
+    num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / step_theta) + 1, 30)
+    
+    r_grid = np.linspace(0, cfg.r_max, num_r_points)
+    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
+    r_grid_omp = r_grid
+    theta_grid_omp = theta_grid
+    
+    print(f"📐 动态网格: {len(r_grid)}×{len(theta_grid)} 点")
 
     cvnn = load_cvnn_model(device, L_snapshots=(None if use_random_model else L_list[0]), use_random_model=use_random_model)
     cvnn.eval()
