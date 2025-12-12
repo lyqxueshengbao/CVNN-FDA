@@ -190,6 +190,8 @@ def main():
                         help='评测时每个条件下的样本数 (默认 500)')
     parser.add_argument('--fast', action='store_true',
                         help='快速模式，只测神经网络方法 (GPU利用率高，跳过 MUSIC/ESPRIT/OMP)')
+    parser.add_argument('--music-continuous', action='store_true',
+                        help='使用连续优化版 MUSIC (消除栅栏效应，逼近 CRB，速度较慢)')
     
     args = parser.parse_args()
     
@@ -236,7 +238,8 @@ def main():
         snr_list, results, L = run_benchmark(
             L_snapshots=args.snapshots, 
             num_samples=args.num_samples,
-            fast_mode=args.fast
+            fast_mode=args.fast,
+            music_continuous=args.music_continuous
         )
         plot_results(snr_list, results, L_snapshots=L)
     

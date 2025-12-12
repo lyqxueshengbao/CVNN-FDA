@@ -20,6 +20,7 @@ import os
 import glob
 import json
 from tqdm import tqdm
+from scipy.optimize import minimize
 
 import config as cfg
 from model import FDA_CVNN, FDA_CVNN_Attention, FDA_CVNN_FAR
@@ -193,6 +194,88 @@ def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
                 refined_r, refined_theta = r, t
     
     return refined_r, refined_theta
+
+
+# ==========================================
+# 1b. 连续优化 MUSIC (消除栅栏效应，逼近 CRB)
+# ==========================================
+def music_2d_continuous(R, r_search_coarse, theta_search_coarse):
+    """
+    [高精度修复版] 连续优化 MUSIC
+    
+    策略: 粗网格搜索 + Scipy 连续优化 (Nelder-Mead)
+    解决: 彻底消除"栅栏效应"，在高 SNR 下能紧贴 CRB
+    
+    注意: 比 music_2d_refined 慢 ~3-5 倍，但精度更高
+    """
+    M, N = cfg.M, cfg.N
+    
+    # 1. 特征分解
+    w, v = np.linalg.eigh(R)
+    Un = v[:, :-1]  # 噪声子空间 (假设单目标)
+    
+    # --- 阶段一: 向量化粗搜索 ---
+    R_grid, Theta_grid = np.meshgrid(r_search_coarse, theta_search_coarse, indexing='ij')
+    R_flat = R_grid.flatten()
+    Theta_flat = Theta_grid.flatten()
+    
+    m_idx = np.arange(M).reshape(-1, 1)
+    n_idx = np.arange(N).reshape(-1, 1)
+    Theta_rad = np.deg2rad(Theta_flat)
+    
+    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c +
+              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
+    a_tx = np.exp(1j * phi_tx)
+    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
+    a_rx = np.exp(1j * phi_rx)
+    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
+    
+    # 计算谱 (分母越小越好)
+    proj = Un.conj().T @ A
+    spectrum_denom = np.sum(np.abs(proj)**2, axis=0)
+    
+    idx = np.argmin(spectrum_denom)  # 找分母最小值
+    r0 = R_flat[idx]
+    theta0 = Theta_flat[idx]
+    
+    # --- 阶段二: 连续优化 (Nelder-Mead) ---
+    def objective_function(x):
+        r, theta_deg = x
+        # 边界检查
+        if r < 0 or r > cfg.r_max:
+            return 1e10
+        if theta_deg < cfg.theta_min or theta_deg > cfg.theta_max:
+            return 1e10
+            
+        theta = np.deg2rad(theta_deg)
+        
+        # 生成导向矢量
+        m = np.arange(M)
+        n = np.arange(N)
+        
+        phi_tx_ = (-4 * np.pi * cfg.delta_f * m * r / cfg.c +
+                   2 * np.pi * cfg.d * m * np.sin(theta) / cfg.wavelength)
+        a_tx_ = np.exp(1j * phi_tx_)
+        
+        phi_rx_ = 2 * np.pi * cfg.d * n * np.sin(theta) / cfg.wavelength
+        a_rx_ = np.exp(1j * phi_rx_)
+        
+        a = np.kron(a_tx_, a_rx_)
+        
+        # 投影到噪声子空间 (最小化)
+        return np.linalg.norm(Un.conj().T @ a) ** 2
+
+    # 使用 Nelder-Mead 算法
+    res = minimize(objective_function, x0=[r0, theta0], method='Nelder-Mead',
+                   options={'xatol': 0.1, 'fatol': 1e-8, 'maxiter': 100})
+    
+    final_r, final_theta = res.x
+    
+    # 确保结果在有效范围内
+    final_r = np.clip(final_r, 0, cfg.r_max)
+    final_theta = np.clip(final_theta, cfg.theta_min, cfg.theta_max)
+    
+    return final_r, final_theta
 
 
 # ==========================================
@@ -406,7 +489,7 @@ def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=
 # ==========================================
 # 5. 运行对比实验
 # ==========================================
-def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False):
+def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_continuous=False):
     """
     运行 SNR 对比实验
     
@@ -414,6 +497,7 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False):
         L_snapshots: 快拍数
         num_samples: 每个 SNR 下的测试样本数 (默认 500)
         fast_mode: 快速模式，只测神经网络方法 (GPU 利用率高)
+        music_continuous: 使用连续优化版 MUSIC (消除栅栏效应，逼近 CRB)
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 使用设备: {device}")
@@ -476,6 +560,8 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False):
     
     print(f"\n📐 物理分辨率: Range={res_r:.2f}m, Angle={res_theta:.2f}°")
     print(f"📐 动态生成网格: {len(r_grid)}×{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点 (基于分辨率/2)")
+    if music_continuous:
+        print(f"🔬 MUSIC 使用连续优化 (消除栅栏效应，逼近 CRB)")
 
     print(f"\n{'='*70}\n📊 对比实验开始 (Samples={num_samples})\n{'='*70}")
 
@@ -504,9 +590,12 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False):
             errors["Real-CNN"]["theta"].append((pred[1]*(cfg.theta_max-cfg.theta_min)+cfg.theta_min - theta_true)**2)
             errors["Real-CNN"]["time"].append(time.time()-t0)
 
-            # MUSIC
+            # MUSIC (可选连续优化版本)
             t0 = time.time()
-            r_est, th_est = music_2d_refined(R_complex, r_grid, theta_grid)
+            if music_continuous:
+                r_est, th_est = music_2d_continuous(R_complex, r_grid, theta_grid)
+            else:
+                r_est, th_est = music_2d_refined(R_complex, r_grid, theta_grid)
             errors["MUSIC"]["r"].append((r_est-r_true)**2)
             errors["MUSIC"]["theta"].append((th_est-theta_true)**2)
             errors["MUSIC"]["time"].append(time.time()-t0)
