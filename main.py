@@ -186,8 +186,8 @@ def main():
                         help='训练时随机化快拍数 (L=1~100)，提高对不同快拍数的鲁棒性')
     parser.add_argument('--use-random-model', action='store_true',
                         help='测试时使用 Lrandom 通用模型 (一个模型测所有快拍数)')
-    parser.add_argument('--num-samples', type=int, default=500,
-                        help='评测时每个条件下的样本数 (默认 500)')
+    parser.add_argument('--num-samples', type=int, default=1000,
+                        help='评测时每个条件下的样本数 (默认 1000，增加可获得更平滑曲线)')
     parser.add_argument('--fast', action='store_true',
                         help='快速模式，只测神经网络方法 (GPU利用率高，跳过 MUSIC/ESPRIT/OMP)')
     parser.add_argument('--music-continuous', action='store_true',
