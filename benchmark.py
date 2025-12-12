@@ -98,11 +98,20 @@ def compute_crb_full(snr_db, r_true, theta_true, L=None):
 
 def compute_crb_average(snr_db, L=None, num_samples=200):
     """
-    [修复核心]: 计算多个随机目标位置的 CRB
-    使用中位数 (Median) 避免奇异值拉高均值
+    [修正] 使用 Mean 而非 Median，与 RMSE 的统计口径保持一致
+    
+    说明：
+    - RMSE 使用 np.sqrt(np.mean(errors))，是均值统计
+    - CRB 也应该使用均值，否则会出现 RMSE < CRB 的"不合理"现象
+    - FDA-MIMO 在某些角度 CRB 会变得很大（接近不可观测），需要截断
     """
     crb_r_list = []
     crb_theta_list = []
+    
+    # 限制 CRB 的最大值，防止极端值拉爆均值
+    # FDA-MIMO 在端射方向不可观测，CRB 理论上无穷大
+    limit_r = cfg.r_max
+    limit_theta = 180
 
     for _ in range(num_samples):
         r_true = np.random.uniform(0, cfg.r_max)
@@ -110,15 +119,17 @@ def compute_crb_average(snr_db, L=None, num_samples=200):
         
         crb_r, crb_theta = compute_crb_full(snr_db, r_true, theta_true, L)
         
+        # 严格过滤 NaN、Inf 和物理上不可能的大值
         if np.isfinite(crb_r) and np.isfinite(crb_theta):
-            if crb_r < cfg.r_max * 10:
+            if crb_r < limit_r and crb_theta < limit_theta:
                 crb_r_list.append(crb_r)
                 crb_theta_list.append(crb_theta)
 
     if not crb_r_list:
         return np.inf, np.inf
 
-    return np.median(crb_r_list), np.median(crb_theta_list)
+    # 使用 Mean，与 RMSE 统计口径一致
+    return np.mean(crb_r_list), np.mean(crb_theta_list)
 
 
 # ==========================================
