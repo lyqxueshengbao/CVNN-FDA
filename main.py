@@ -239,7 +239,9 @@ def main():
             L_snapshots=args.snapshots, 
             num_samples=args.num_samples,
             fast_mode=args.fast,
-            music_continuous=args.music_continuous
+            music_continuous=args.music_continuous,
+            use_random_model=args.use_random_model,
+            model_type=args.model
         )
         plot_results(snr_list, results, L_snapshots=L)
     
@@ -257,7 +259,8 @@ def main():
             snr_db=args.snr, 
             L_list=L_list,
             num_samples=args.num_samples,
-            use_random_model=args.use_random_model
+            use_random_model=args.use_random_model,
+            music_continuous=args.music_continuous
         )
         
     else:

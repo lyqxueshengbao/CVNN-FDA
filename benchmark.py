@@ -464,10 +464,10 @@ def find_best_model_path(L_snapshots=None, model_type=None, use_random_model=Fal
     return f"{checkpoint_dir}/fda_cvnn_best.pth"
 
 
-def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=False):
+def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=False, model_type=None):
     """智能加载 CVNN 模型"""
     if model_path is None:
-        model_path = find_best_model_path(L_snapshots, use_random_model=use_random_model)
+        model_path = find_best_model_path(L_snapshots, model_type=model_type, use_random_model=use_random_model)
         print(f"🔍 自动选择模型: {model_path}")
     
     if not os.path.exists(model_path):
@@ -500,7 +500,7 @@ def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=
 # ==========================================
 # 5. 运行对比实验
 # ==========================================
-def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_continuous=False):
+def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_continuous=False, use_random_model=False, model_type=None):
     """
     运行 SNR 对比实验
     
@@ -520,7 +520,7 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     if fast_mode:
         print(f"⚡ 快速模式: 只测试神经网络方法 (GPU 密集)")
 
-    cvnn = load_cvnn_model(device, L_snapshots=L)
+    cvnn = load_cvnn_model(device, L_snapshots=L, use_random_model=use_random_model, model_type=model_type)
     cvnn.eval()
 
     real_cnn = RealCNN().to(device)
@@ -601,29 +601,32 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
             errors["Real-CNN"]["theta"].append((pred[1]*(cfg.theta_max-cfg.theta_min)+cfg.theta_min - theta_true)**2)
             errors["Real-CNN"]["time"].append(time.time()-t0)
 
-            # MUSIC (可选连续优化版本)
-            t0 = time.time()
-            if music_continuous:
-                r_est, th_est = music_2d_continuous(R_complex, r_grid, theta_grid)
-            else:
-                r_est, th_est = music_2d_refined(R_complex, r_grid, theta_grid)
-            errors["MUSIC"]["r"].append((r_est-r_true)**2)
-            errors["MUSIC"]["theta"].append((th_est-theta_true)**2)
-            errors["MUSIC"]["time"].append(time.time()-t0)
+            if "MUSIC" in errors:
+                # MUSIC (可选连续优化版本)
+                t0 = time.time()
+                if music_continuous:
+                    r_est, th_est = music_2d_continuous(R_complex, r_grid, theta_grid)
+                else:
+                    r_est, th_est = music_2d_refined(R_complex, r_grid, theta_grid)
+                errors["MUSIC"]["r"].append((r_est-r_true)**2)
+                errors["MUSIC"]["theta"].append((th_est-theta_true)**2)
+                errors["MUSIC"]["time"].append(time.time()-t0)
 
-            # ESPRIT
-            t0 = time.time()
-            r_est, th_est = esprit_2d_robust(R_complex, cfg.M, cfg.N)
-            errors["ESPRIT"]["r"].append((r_est-r_true)**2)
-            errors["ESPRIT"]["theta"].append((th_est-theta_true)**2)
-            errors["ESPRIT"]["time"].append(time.time()-t0)
+            if "ESPRIT" in errors:
+                # ESPRIT
+                t0 = time.time()
+                r_est, th_est = esprit_2d_robust(R_complex, cfg.M, cfg.N)
+                errors["ESPRIT"]["r"].append((r_est-r_true)**2)
+                errors["ESPRIT"]["theta"].append((th_est-theta_true)**2)
+                errors["ESPRIT"]["time"].append(time.time()-t0)
 
-            # OMP [Modified call: use refined version]
-            t0 = time.time()
-            r_est, th_est = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp, refine=True)
-            errors["OMP"]["r"].append((r_est-r_true)**2)
-            errors["OMP"]["theta"].append((th_est-theta_true)**2)
-            errors["OMP"]["time"].append(time.time()-t0)
+            if "OMP" in errors:
+                # OMP [Modified call: use refined version]
+                t0 = time.time()
+                r_est, th_est = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp, refine=True)
+                errors["OMP"]["r"].append((r_est-r_true)**2)
+                errors["OMP"]["theta"].append((th_est-theta_true)**2)
+                errors["OMP"]["time"].append(time.time()-t0)
 
         # 统计
         for m in methods:
@@ -636,7 +639,14 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
         results["CRB"]["rmse_theta"].append(crb_theta)
         results["CRB"]["time"].append(0)
 
-        print(f"| CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m | MUSIC: {results['MUSIC']['rmse_r'][-1]:.2f}m | OMP: {results['OMP']['rmse_r'][-1]:.2f}m")
+        summary_parts = [f"CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m"]
+        if "MUSIC" in results:
+            summary_parts.append(f"MUSIC: {results['MUSIC']['rmse_r'][-1]:.2f}m")
+        if "OMP" in results:
+            summary_parts.append(f"OMP: {results['OMP']['rmse_r'][-1]:.2f}m")
+        if "Real-CNN" in results:
+            summary_parts.append(f"Real-CNN: {results['Real-CNN']['rmse_r'][-1]:.2f}m")
+        print("| " + " | ".join(summary_parts))
 
     return snr_list, results, L
 
@@ -727,10 +737,12 @@ def plot_results(snr_list, results, L_snapshots=None):
 # ==========================================
 # 7. 快拍数对比实验
 # ==========================================
-def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_model=False):
+def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_model=False, music_continuous=False):
     if L_list is None: L_list = [1, 5, 10, 25, 50, 100]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*70}\n📊 快拍数对比实验 (SNR={snr_db}dB)\n{'='*70}")
+    if music_continuous:
+        print("🔬 MUSIC 使用连续优化 (消除栅栏效应，逼近 CRB)")
     
     methods = ["MUSIC", "ESPRIT", "OMP", "CVNN", "CRB"]
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
@@ -772,28 +784,37 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
             
             t0 = time.time(); pred = cvnn(R_tensor).cpu().detach().numpy()[0]
             errors["CVNN"]["r"].append((pred[0]*cfg.r_max - r_true)**2)
+            errors["CVNN"]["theta"].append((pred[1]*(cfg.theta_max-cfg.theta_min)+cfg.theta_min - theta_true)**2)
             errors["CVNN"]["time"].append(time.time()-t0)
             
-            t0 = time.time(); r_est, _ = music_2d_refined(R_complex, r_grid, theta_grid)
+            if music_continuous:
+                t0 = time.time(); r_est, th_est = music_2d_continuous(R_complex, r_grid, theta_grid)
+            else:
+                t0 = time.time(); r_est, th_est = music_2d_refined(R_complex, r_grid, theta_grid)
             errors["MUSIC"]["r"].append((r_est - r_true)**2)
+            errors["MUSIC"]["theta"].append((th_est - theta_true)**2)
             errors["MUSIC"]["time"].append(time.time()-t0)
             
-            t0 = time.time(); r_est, _ = esprit_2d_robust(R_complex, cfg.M, cfg.N)
+            t0 = time.time(); r_est, th_est = esprit_2d_robust(R_complex, cfg.M, cfg.N)
             errors["ESPRIT"]["r"].append((r_est - r_true)**2)
+            errors["ESPRIT"]["theta"].append((th_est - theta_true)**2)
             errors["ESPRIT"]["time"].append(time.time()-t0)
             
             # OMP Modified
-            t0 = time.time(); r_est, _ = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp)
+            t0 = time.time(); r_est, th_est = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp)
             errors["OMP"]["r"].append((r_est - r_true)**2)
+            errors["OMP"]["theta"].append((th_est - theta_true)**2)
             errors["OMP"]["time"].append(time.time()-t0)
 
         for m in methods:
             if m != "CRB":
                 results[m]["rmse_r"].append(np.sqrt(np.mean(errors[m]["r"])))
+                results[m]["rmse_theta"].append(np.sqrt(np.mean(errors[m]["theta"])))
                 results[m]["time"].append(np.mean(errors[m]["time"]))
         
-        crb_r, _ = compute_crb_average(snr_db, L=L, num_samples=200)
+        crb_r, crb_theta = compute_crb_average(snr_db, L=L, num_samples=200)
         results["CRB"]["rmse_r"].append(crb_r)
+        results["CRB"]["rmse_theta"].append(crb_theta)
         
         print(f"L={L:<3} | CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m | OMP: {results['OMP']['rmse_r'][-1]:.2f}m")
 
