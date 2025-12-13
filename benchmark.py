@@ -179,38 +179,48 @@ def load_models(device, L):
 # =========================================================
 # 4. 主流程
 # =========================================================
-def run_benchmark(L_snapshots=None, num_samples=200):
+def run_benchmark(L_snapshots=None, num_samples=200, fast_mode=False, snr_list=None, device=None):
     # 动态修改全局配置以适配 utils_physics
     if L_snapshots is not None:
         cfg.L_snapshots = L_snapshots
     else:
         L_snapshots = cfg.L_snapshots
 
-    device = cfg.device
+    if device is None:
+        device = torch.device("cpu")
+    elif isinstance(device, str):
+        device = torch.device(device)
 
     print(f"\n🚀 开始评测 (Data Source: utils_physics)")
-    print(f"   L={L_snapshots}, Samples={num_samples}")
+    print(f"   device={device}, L={L_snapshots}, Samples={num_samples}, fast_mode={fast_mode}")
 
     # 1. 加载模型
     cvnn, rcnn = load_models(device, L_snapshots)
 
     # 2. 构建字典 (用于 MUSIC/OMP)
-    # 为了展示 CVNN 的优势，MUSIC 网格不需要太密，标准即可
-    print("⏳ 正在构建搜索字典 (基于 utils_physics)...")
-    res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
-    res_t = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
+    # fast_mode=True 时只测神经网络，不构建字典
+    A, grid_coords = None, None
+    if not fast_mode:
+        print("⏳ 正在构建搜索字典 (基于 utils_physics)...")
+        res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
+        res_t = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
 
-    # 网格密度因子: 1.0 = 物理分辨率; 2.0 = 2倍分辨率
-    grid_factor = 2.0
-    grid_r = np.arange(cfg.r_min, cfg.r_max, res_r/grid_factor)
-    grid_theta = np.arange(cfg.theta_min, cfg.theta_max, res_t/grid_factor)
+        # 网格密度因子: 1.0 = 物理分辨率; 2.0 = 2倍分辨率
+        grid_factor = 2.0
+        grid_r = np.arange(cfg.r_min, cfg.r_max, res_r / grid_factor)
+        grid_theta = np.arange(cfg.theta_min, cfg.theta_max, res_t / grid_factor)
 
-    A, grid_coords = build_dictionary(grid_r, grid_theta)
-    print(f"✅ 字典构建完成: {A.shape}, 网格点数: {len(grid_coords)}")
+        A, grid_coords = build_dictionary(grid_r, grid_theta)
+        print(f"✅ 字典构建完成: {A.shape}, 网格点数: {len(grid_coords)}")
 
     # 3. 循环测试
-    snr_list = [-10, -5, 0, 5, 10, 15, 20]
-    methods = ['CVNN', 'Real-CNN', 'MUSIC', 'ESPRIT', 'OMP']
+    if snr_list is None:
+        snr_list = [-10, -5, 0, 5, 10, 15, 20]
+
+    if fast_mode:
+        methods = ['CVNN', 'Real-CNN']
+    else:
+        methods = ['CVNN', 'Real-CNN', 'MUSIC', 'ESPRIT', 'OMP']
     results = {m: {'r': [], 't': [], 'time': []} for m in methods}
     results['CRB'] = {'r': [], 't': []}
 
@@ -259,28 +269,29 @@ def run_benchmark(L_snapshots=None, num_samples=200):
             errs['Real-CNN']['t'].append((t_pred - t_true)**2)
             errs['Real-CNN']['time'].append(t_rcnn)
 
-            # 3. MUSIC
-            t0 = time.time()
-            r_est, t_est = music_algorithm(R_complex, A, grid_coords)
-            errs['MUSIC']['time'].append(time.time() - t0)
-            errs['MUSIC']['r'].append((r_est - r_true)**2)
-            errs['MUSIC']['t'].append((t_est - t_true)**2)
+            if not fast_mode:
+                # 3. MUSIC
+                t0 = time.time()
+                r_est, t_est = music_algorithm(R_complex, A, grid_coords)
+                errs['MUSIC']['time'].append(time.time() - t0)
+                errs['MUSIC']['r'].append((r_est - r_true)**2)
+                errs['MUSIC']['t'].append((t_est - t_true)**2)
 
-            # 4. OMP
-            t0 = time.time()
-            r_est, t_est = omp_algorithm(R_complex, A, grid_coords)
-            errs['OMP']['time'].append(time.time() - t0)
-            errs['OMP']['r'].append((r_est - r_true)**2)
-            errs['OMP']['t'].append((t_est - t_true)**2)
+                # 4. OMP
+                t0 = time.time()
+                r_est, t_est = omp_algorithm(R_complex, A, grid_coords)
+                errs['OMP']['time'].append(time.time() - t0)
+                errs['OMP']['r'].append((r_est - r_true)**2)
+                errs['OMP']['t'].append((t_est - t_true)**2)
 
-            # 5. ESPRIT
-            t0 = time.time()
-            r_est, t_est = esprit_algorithm(R_complex)
-            errs['ESPRIT']['time'].append(time.time() - t0)
-            # 简单的异常值过滤
-            if abs(r_est - r_true) < cfg.r_max:
-                errs['ESPRIT']['r'].append((r_est - r_true)**2)
-                errs['ESPRIT']['t'].append((t_est - t_true)**2)
+                # 5. ESPRIT
+                t0 = time.time()
+                r_est, t_est = esprit_algorithm(R_complex)
+                errs['ESPRIT']['time'].append(time.time() - t0)
+                # 简单的异常值过滤
+                if abs(r_est - r_true) < cfg.r_max:
+                    errs['ESPRIT']['r'].append((r_est - r_true)**2)
+                    errs['ESPRIT']['t'].append((t_est - t_true)**2)
 
         # 统计 RMSE
         for m in methods:
@@ -297,9 +308,124 @@ def run_benchmark(L_snapshots=None, num_samples=200):
         results['CRB']['r'].append(results['CVNN']['r'][-1] * 0.5)
         results['CRB']['t'].append(results['CVNN']['t'][-1] * 0.5)
 
-        print(f"SNR={snr}dB | RMSE_R: CVNN={results['CVNN']['r'][-1]:.2f}m, MUSIC={results['MUSIC']['r'][-1]:.2f}m")
+        if not fast_mode:
+            print(f"SNR={snr}dB | RMSE_R: CVNN={results['CVNN']['r'][-1]:.2f}m, MUSIC={results['MUSIC']['r'][-1]:.2f}m")
+        else:
+            print(f"SNR={snr}dB | RMSE_R: CVNN={results['CVNN']['r'][-1]:.2f}m, Real-CNN={results['Real-CNN']['r'][-1]:.2f}m")
 
-    return snr_list, results
+    return snr_list, results, L_snapshots
+
+
+def plot_results(snr_list, results, L_snapshots=None):
+    """兼容 main.py 的绘图入口。"""
+    if L_snapshots is None:
+        L_snapshots = cfg.L_snapshots
+    plot_benchmark(snr_list, results, L_snapshots)
+
+
+def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, fast_mode=False, device=None):
+    """对比不同快拍数 L 下的性能。
+
+    返回:
+        L_list: list[int]
+        results: dict[str, dict[str, list]]，每个方法包含 rmse_r / rmse_theta / time
+    """
+    if L_list is None:
+        L_list = [1, 5, 10, 15, 20, 25]
+
+    if device is None:
+        device = torch.device("cpu")
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    if fast_mode:
+        methods = ['CVNN', 'Real-CNN']
+    else:
+        methods = ['CVNN', 'Real-CNN', 'MUSIC', 'ESPRIT', 'OMP']
+
+    out = {m: {'rmse_r': [], 'rmse_theta': [], 'time': []} for m in methods}
+
+    # 预构建字典（与 L 无关），避免每个 L 重复构建
+    A, grid_coords = None, None
+    if not fast_mode:
+        res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
+        res_t = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
+        grid_factor = 2.0
+        grid_r = np.arange(cfg.r_min, cfg.r_max, res_r / grid_factor)
+        grid_theta = np.arange(cfg.theta_min, cfg.theta_max, res_t / grid_factor)
+        A, grid_coords = build_dictionary(grid_r, grid_theta)
+
+    for L in L_list:
+        # 动态修改全局配置以适配 utils_physics
+        cfg.L_snapshots = int(L)
+
+        cvnn, rcnn = load_models(device, int(L))
+
+        errs = {m: {'r': [], 't': [], 'time': []} for m in methods}
+        for _ in range(num_samples):
+            r_true = np.random.uniform(cfg.r_min, cfg.r_max)
+            t_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
+
+            R_tensor = generate_covariance_matrix(r_true, t_true, snr_db)
+            R_complex = R_tensor[0] + 1j * R_tensor[1]
+            R_torch = torch.FloatTensor(R_tensor).unsqueeze(0).to(device)
+
+            # CVNN
+            t0 = time.time()
+            with torch.no_grad():
+                pred = cvnn(R_torch).cpu().numpy()[0]
+            t_cvnn = time.time() - t0
+            r_pred = pred[0] * (cfg.r_max - cfg.r_min) + cfg.r_min
+            t_pred = pred[1] * (cfg.theta_max - cfg.theta_min) + cfg.theta_min
+            errs['CVNN']['r'].append((r_pred - r_true) ** 2)
+            errs['CVNN']['t'].append((t_pred - t_true) ** 2)
+            errs['CVNN']['time'].append(t_cvnn)
+
+            # Real-CNN
+            t0 = time.time()
+            with torch.no_grad():
+                pred = rcnn(R_torch).cpu().numpy()[0]
+            t_rcnn = time.time() - t0
+            r_pred = pred[0] * (cfg.r_max - cfg.r_min) + cfg.r_min
+            t_pred = pred[1] * (cfg.theta_max - cfg.theta_min) + cfg.theta_min
+            errs['Real-CNN']['r'].append((r_pred - r_true) ** 2)
+            errs['Real-CNN']['t'].append((t_pred - t_true) ** 2)
+            errs['Real-CNN']['time'].append(t_rcnn)
+
+            if not fast_mode:
+                # MUSIC
+                t0 = time.time()
+                r_est, t_est = music_algorithm(R_complex, A, grid_coords)
+                errs['MUSIC']['time'].append(time.time() - t0)
+                errs['MUSIC']['r'].append((r_est - r_true) ** 2)
+                errs['MUSIC']['t'].append((t_est - t_true) ** 2)
+
+                # OMP
+                t0 = time.time()
+                r_est, t_est = omp_algorithm(R_complex, A, grid_coords)
+                errs['OMP']['time'].append(time.time() - t0)
+                errs['OMP']['r'].append((r_est - r_true) ** 2)
+                errs['OMP']['t'].append((t_est - t_true) ** 2)
+
+                # ESPRIT
+                t0 = time.time()
+                r_est, t_est = esprit_algorithm(R_complex)
+                errs['ESPRIT']['time'].append(time.time() - t0)
+                if abs(r_est - r_true) < cfg.r_max:
+                    errs['ESPRIT']['r'].append((r_est - r_true) ** 2)
+                    errs['ESPRIT']['t'].append((t_est - t_true) ** 2)
+
+        for m in methods:
+            if errs[m]['r']:
+                out[m]['rmse_r'].append(float(np.sqrt(np.mean(errs[m]['r']))))
+                out[m]['rmse_theta'].append(float(np.sqrt(np.mean(errs[m]['t']))))
+                out[m]['time'].append(float(np.mean(errs[m]['time'])))
+            else:
+                out[m]['rmse_r'].append(float('nan'))
+                out[m]['rmse_theta'].append(float('nan'))
+                out[m]['time'].append(float('nan'))
+
+    return L_list, out
 
 # =========================================================
 # 5. 绘图
@@ -349,5 +475,5 @@ def plot_benchmark(snr_list, results, L):
 
 if __name__ == "__main__":
     L = cfg.L_snapshots
-    snr_list, results = run_benchmark(L_snapshots=L, num_samples=200)
+    snr_list, results, L = run_benchmark(L_snapshots=L, num_samples=200)
     plot_benchmark(snr_list, results, L)
