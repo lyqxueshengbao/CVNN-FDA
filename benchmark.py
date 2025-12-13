@@ -768,16 +768,28 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
         
         print(f"L={L:<3} | CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m | MUSIC: {results['MUSIC']['rmse_r'][-1]:.2f}m")
 
+    # 使用与 plot_results 一致的颜色和标记
+    colors = {'CVNN': '#1f77b4', 'Real-CNN': '#2ca02c', 'MUSIC': '#d62728', 'ESPRIT': '#ff7f0e'}
+    markers = {'CVNN': 'o', 'Real-CNN': '^', 'MUSIC': 's', 'ESPRIT': 'd'}
+    
     plt.figure(figsize=(10, 6))
     for m in methods:
+        if m == "CRB": continue  # CRB 单独画
         if m == "ESPRIT" and np.mean(results[m]["rmse_r"]) > 500: continue
-        plt.plot(L_list, results[m]["rmse_r"], 'o-', label=m)
-    plt.plot(L_list, results["CRB"]["rmse_r"], 'k--', label='CRB')
+        plt.plot(L_list, results[m]["rmse_r"], 
+                 color=colors.get(m, 'gray'), 
+                 marker=markers.get(m, 'o'), 
+                 linewidth=2, markersize=8, label=m)
+    plt.plot(L_list, results["CRB"]["rmse_r"], 'k--', linewidth=2, label='CRB')
     plt.xscale('log'); plt.yscale('log')
-    plt.xlabel('Snapshots (L)'); plt.ylabel('RMSE Range (m)')
-    plt.title(f'Performance vs Snapshots (SNR={snr_db}dB)')
-    plt.legend(); plt.grid(True, which='both')
-    plt.savefig(f'results/snapshots_SNR{snr_db}dB.png')
+    plt.xlabel('Snapshots (L)', fontsize=12)
+    plt.ylabel('RMSE Range (m)', fontsize=12)
+    plt.title(f'Performance vs Snapshots (SNR={snr_db}dB)', fontsize=14)
+    plt.legend(fontsize=10)
+    plt.grid(True, which='both', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(f'results/snapshots_SNR{snr_db}dB.png', dpi=300)
+    print(f"\n✅ 图表已保存: results/snapshots_SNR{snr_db}dB.png")
     
     return L_list, results
 
