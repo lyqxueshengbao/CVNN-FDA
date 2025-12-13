@@ -731,32 +731,47 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     cvnn.eval()
 
     for L in L_list:
-        print(f"📡 L = {L} 快拍", end="\r")
+        print(f"\n{'='*70}")
+        print(f"📡 L = {L} 快拍")
+        print(f"{'='*70}")
         cfg.L_snapshots = L
         if not use_random_model:
             cvnn = load_cvnn_model(device, L_snapshots=L)
             cvnn.eval()
 
         errors = {m: {"r": [], "theta": [], "time": []} for m in methods}
+        sample_results = []  # 存储详细结果
 
-        for _ in tqdm(range(num_samples), leave=False):
+        for sample_idx in tqdm(range(num_samples), leave=False):
             r_true = np.random.uniform(0, cfg.r_max)
             theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
             R = generate_covariance_matrix(r_true, theta_true, snr_db)
             R_complex = R[0] + 1j * R[1]
             R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device)
             
-            t0 = time.time(); pred = cvnn(R_tensor).cpu().detach().numpy()[0]
-            errors["CVNN"]["r"].append((pred[0]*cfg.r_max - r_true)**2)
+            sample_data = {"r_true": r_true, "theta_true": theta_true}
+            
+            t0 = time.time()
+            pred = cvnn(R_tensor).cpu().detach().numpy()[0]
+            r_est_cvnn = pred[0]*cfg.r_max
+            th_est_cvnn = pred[1]*(cfg.theta_max-cfg.theta_min)+cfg.theta_min
+            errors["CVNN"]["r"].append((r_est_cvnn - r_true)**2)
             errors["CVNN"]["time"].append(time.time()-t0)
+            sample_data["CVNN"] = (r_est_cvnn, th_est_cvnn)
             
-            t0 = time.time(); r_est, _ = music_2d_refined(R_complex, r_grid, theta_grid)
-            errors["MUSIC"]["r"].append((r_est - r_true)**2)
+            t0 = time.time()
+            r_est_music, th_est_music = music_2d_refined(R_complex, r_grid, theta_grid)
+            errors["MUSIC"]["r"].append((r_est_music - r_true)**2)
             errors["MUSIC"]["time"].append(time.time()-t0)
+            sample_data["MUSIC"] = (r_est_music, th_est_music)
             
-            t0 = time.time(); r_est, _ = esprit_2d_robust(R_complex, cfg.M, cfg.N)
-            errors["ESPRIT"]["r"].append((r_est - r_true)**2)
+            t0 = time.time()
+            r_est_esprit, th_est_esprit = esprit_2d_robust(R_complex, cfg.M, cfg.N)
+            errors["ESPRIT"]["r"].append((r_est_esprit - r_true)**2)
             errors["ESPRIT"]["time"].append(time.time()-t0)
+            sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
+            
+            sample_results.append(sample_data)
 
         for m in methods:
             if m != "CRB":
@@ -766,7 +781,26 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
         crb_r, _ = compute_crb_average(snr_db, L=L, num_samples=200)
         results["CRB"]["rmse_r"].append(crb_r)
         
-        print(f"L={L:<3} | CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m | MUSIC: {results['MUSIC']['rmse_r'][-1]:.2f}m")
+        # 输出统计结果
+        print(f"\n📊 L={L} 各算法性能统计:")
+        print(f"{'Method':<12} {'RMSE_r (m)':<12} {'Time (ms)':<12}")
+        print("-" * 40)
+        for m in methods:
+            if m != "CRB":
+                print(f"{m:<12} {results[m]['rmse_r'][-1]:<12.4f} {results[m]['time'][-1]*1000:<12.4f}")
+        print(f"{'CRB':<12} {results['CRB']['rmse_r'][-1]:<12.4f} {'N/A':<12}")
+        
+        # 输出前5个样本的详细估计结果
+        print(f"\n📋 前5个样本的估计结果示例:")
+        print(f"{'#':<4} {'真实值':<20} {'CVNN':<20} {'MUSIC':<20} {'ESPRIT':<20}")
+        print("-" * 90)
+        for i in range(min(5, len(sample_results))):
+            s = sample_results[i]
+            true_str = f"({s['r_true']:.1f}m, {s['theta_true']:.1f}°)"
+            cvnn_str = f"({s['CVNN'][0]:.1f}m, {s['CVNN'][1]:.1f}°)"
+            music_str = f"({s['MUSIC'][0]:.1f}m, {s['MUSIC'][1]:.1f}°)"
+            esprit_str = f"({s['ESPRIT'][0]:.1f}m, {s['ESPRIT'][1]:.1f}°)"
+            print(f"{i+1:<4} {true_str:<20} {cvnn_str:<20} {music_str:<20} {esprit_str:<20}")
 
     # 使用与 plot_results 一致的颜色和标记
     colors = {'CVNN': '#1f77b4', 'Real-CNN': '#2ca02c', 'MUSIC': '#d62728', 'ESPRIT': '#ff7f0e'}
