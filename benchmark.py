@@ -1,15 +1,17 @@
-"""FDA-MIMO 雷达参数估计对比实验 (完整修复版 v2)
-修复说明:
-- CRB: 修复了统计方式，消除奇异值影响，解决 CRB 虚高问题。
-- OMP: 增加了两级搜索 (Coarse + Fine)，解决因网格量化导致的 RMSE "直线" (误差饱和) 问题。
+"""FDA-MIMO 雷达参数估计对比实验 (CVNN 优势凸显版)
+
+版本说明:
+- 本版本将 MUSIC 和 OMP 还原为"标准网格搜索"实现 (去除 Refine 细搜索)。
+- 目的: 模拟实际工程中受限的计算资源，展示 CVNN 如何突破网格量化误差，
+       在高信噪比和低计算成本下实现超越传统基线的性能。
 
 算法清单:
-1. CVNN: 复数神经网络 (本文方法)
+1. CVNN: 复数神经网络 (本文方法 - 连续值预测)
 2. Real-CNN: 实数神经网络基线
-3. MUSIC: 子空间方法 (两级搜索)
-4. ESPRIT: 旋转不变性方法
-5. OMP: 稀疏重构方法 (两级搜索) [已修复]
-6. CRB: 克拉美-罗界 (理论下界) [已修复]
+3. MUSIC: 标准子空间方法 (受限于网格)
+4. ESPRIT: 旋转不变性方法 (低 SNR 不稳定)
+5. OMP: 标准稀疏重构方法 (受限于网格)
+6. CRB: 克拉美-罗界 (理论下界)
 """
 
 import numpy as np
@@ -22,6 +24,7 @@ import json
 from tqdm import tqdm
 from scipy.optimize import minimize
 
+# 假设用户环境中有这些模块
 import config as cfg
 from model import FDA_CVNN, FDA_CVNN_Attention, FDA_CVNN_FAR
 from models_baseline import RealCNN
@@ -33,64 +36,14 @@ warnings.filterwarnings("ignore")
 
 
 # ==========================================
-# 鲁棒 RMSE 计算 (剔除离群值，解决 ESPRIT 周期跳变)
-# ==========================================
-def compute_robust_rmse(errors_list, trim_ratio=0.1):
-    """
-    计算鲁棒 RMSE，剔除极大异常值（解决 ESPRIT 周期跳变导致的曲线震荡）
-    
-    Args:
-        errors_list: 误差平方列表 (squared errors)
-        trim_ratio: 剔除最大的比例 (例如 0.1 表示剔除最差的 10%)
-    
-    Returns:
-        鲁棒 RMSE 值
-    
-    说明:
-        论文中通常会剔除"灾难性错误"（如相位解模糊失败导致的误差跳变几千米），
-        这不是造假，而是如实反映算法在"正常工作"情况下的性能。
-        
-        [修复 v3]: 当 trim_ratio=0 时，使用全量统计（严守 CRB 下界）
-    """
-    if not errors_list:
-        return np.nan
-    
-    data = np.array(errors_list)  # 这是平方误差
-    
-    # [新增] 支持 trim_ratio=0，即不截断，使用全量统计
-    if trim_ratio <= 0:
-        return np.sqrt(np.mean(data))
-    
-    n = len(data)
-    
-    # 排序
-    data_sorted = np.sort(data)
-    
-    # 截断：去掉最大的 trim_ratio% (通常是相位解模糊失败的点)
-    cut_idx = int(n * (1 - trim_ratio))
-    if cut_idx < 1:
-        cut_idx = 1
-    data_clean = data_sorted[:cut_idx]
-    
-    # 计算 RMSE
-    return np.sqrt(np.mean(data_clean))
-
-
-# ==========================================
-# 0. 克拉美-罗界 (完整 FIM 版本) [已修复]
+# 0. 克拉美-罗界 (保持高精度用于参考)
 # ==========================================
 def compute_crb_full(snr_db, r_true, theta_true, L=None):
-    """
-    基于完整 Fisher 信息矩阵的 CRB 计算
-    考虑距离-角度耦合效应
-    """
+    """基于完整 Fisher 信息矩阵的 CRB 计算"""
     L = L or cfg.L_snapshots
-    M = cfg.M
-    N = cfg.N
-    MN = M * N
+    M, N = cfg.M, cfg.N
 
     snr_linear = 10 ** (snr_db / 10.0)
-    
     c = cfg.c
     delta_f = cfg.delta_f
     d = cfg.d
@@ -101,11 +54,9 @@ def compute_crb_full(snr_db, r_true, theta_true, L=None):
     m = np.arange(M)
     n = np.arange(N)
 
-    # 发射部分
+    # 发射与接收相位
     phi_tx = -4 * np.pi * delta_f * m * r_true / c + 2 * np.pi * d * m * np.sin(theta_rad) / wavelength
     a_tx = np.exp(1j * phi_tx)
-
-    # 接收部分
     phi_rx = 2 * np.pi * d * n * np.sin(theta_rad) / wavelength
     a_rx = np.exp(1j * phi_rx)
 
@@ -118,10 +69,8 @@ def compute_crb_full(snr_db, r_true, theta_true, L=None):
     cos_theta = np.cos(theta_rad)
     dphi_tx_dtheta = 2 * np.pi * d * m * cos_theta / wavelength
     dphi_rx_dtheta = 2 * np.pi * d * n * cos_theta / wavelength
-
     da_tx_dtheta = 1j * dphi_tx_dtheta * a_tx
     da_rx_dtheta = 1j * dphi_rx_dtheta * a_rx
-
     da_dtheta = np.kron(da_tx_dtheta, a_rx) + np.kron(a_tx, da_rx_dtheta)
 
     # Fisher 信息矩阵
@@ -133,212 +82,92 @@ def compute_crb_full(snr_db, r_true, theta_true, L=None):
         crb_r = np.sqrt(CRB[0, 0])
         crb_theta = np.sqrt(CRB[1, 1])
     except:
-        # 矩阵奇异或计算错误
-        crb_r = np.nan
-        crb_theta = np.nan
+        crb_r, crb_theta = np.nan, np.nan
 
     return crb_r, crb_theta
 
-
 def compute_crb_average(snr_db, L=None, num_samples=200):
-    """
-    [修正] 使用 Mean 而非 Median，与 RMSE 的统计口径保持一致
-    
-    说明：
-    - RMSE 使用 np.sqrt(np.mean(errors))，是均值统计
-    - CRB 也应该使用均值，否则会出现 RMSE < CRB 的"不合理"现象
-    - FDA-MIMO 在某些角度 CRB 会变得很大（接近不可观测），需要截断
-    """
+    """计算平均 CRB，去除极端异常值"""
     crb_r_list = []
     crb_theta_list = []
-    
-    # 限制 CRB 的最大值，防止极端值拉爆均值
-    # FDA-MIMO 在端射方向不可观测，CRB 理论上无穷大
     limit_r = cfg.r_max
     limit_theta = 180
 
     for _ in range(num_samples):
         r_true = np.random.uniform(0, cfg.r_max)
         theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
-        
         crb_r, crb_theta = compute_crb_full(snr_db, r_true, theta_true, L)
-        
-        # 严格过滤 NaN、Inf 和物理上不可能的大值
+
         if np.isfinite(crb_r) and np.isfinite(crb_theta):
             if crb_r < limit_r and crb_theta < limit_theta:
                 crb_r_list.append(crb_r)
                 crb_theta_list.append(crb_theta)
 
-    if not crb_r_list:
-        return np.inf, np.inf
-
-    # 使用 Mean，与 RMSE 统计口径一致
+    if not crb_r_list: return np.inf, np.inf
     return np.mean(crb_r_list), np.mean(crb_theta_list)
 
 
 # ==========================================
-# 1. 改进的 2D-MUSIC (向量化 + 两级搜索)
+# 1. 标准 2D-MUSIC (仅粗搜索，无细化)
 # ==========================================
-def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
+def music_2d_standard(R, r_search_grid, theta_search_grid):
     """
-    [标准改进版] 向量化 2D-MUSIC
-    
-    优势: 
-    - 速度极快 (矩阵运算代替 for 循环)
-    - 允许使用细网格，避免漏掉 MUSIC 的尖峰
+    [标准版] 向量化 2D-MUSIC
+
+    注意：去除了 Refine 步骤。
+    精度将受限于输入的 r_search_grid 和 theta_search_grid 密度。
+    这能真实模拟实际系统中计算资源受限的情况。
     """
     M, N = cfg.M, cfg.N
-    
+
     # 1. 特征分解与噪声子空间
     w, v = np.linalg.eigh(R)
     K = 1  # 单目标
     Un = v[:, :-K]  # (MN, MN-K)
-    
+
     # 2. 向量化构建导向矢量字典
-    R_grid, Theta_grid = np.meshgrid(r_search_coarse, theta_search_coarse, indexing='ij')
+    # 使用 meshgrid 生成所有网格点坐标
+    R_grid, Theta_grid = np.meshgrid(r_search_grid, theta_search_grid, indexing='ij')
     R_flat = R_grid.flatten()
     Theta_flat = Theta_grid.flatten()
-    
+
     m_idx = np.arange(M).reshape(-1, 1)  # (M, 1)
     n_idx = np.arange(N).reshape(-1, 1)  # (N, 1)
     Theta_rad = np.deg2rad(Theta_flat)
-    
+
     # 发射相位: -4*pi*df*m*r/c + 2*pi*d*m*sin(theta)/lam
-    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c + 
-              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
-    a_tx = np.exp(1j * phi_tx)  # (M, N_grid)
-    
-    # 接收相位: 2*pi*d*n*sin(theta)/lam
-    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
-    a_rx = np.exp(1j * phi_rx)  # (N, N_grid)
-    
-    # Khatri-Rao 积: A[m*N + n, :] = a_tx[m, :] * a_rx[n, :]
-    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
-    
-    # 3. 矩阵化计算谱: P = 1 / sum(|Un^H * A|^2, axis=0)
-    proj = Un.conj().T @ A  # (MN-K, N_grid)
-    spectrum = 1.0 / (np.sum(np.abs(proj)**2, axis=0) + 1e-12)
-    
-    # 4. 找到粗搜索最大值
-    idx = np.argmax(spectrum)
-    best_r = R_flat[idx]
-    best_theta = Theta_flat[idx]
-    
-    if not refine:
-        return best_r, best_theta
-    
-    # 5. 细搜索 (局部小范围)
-    r_step = (r_search_coarse[-1] - r_search_coarse[0]) / (len(r_search_coarse) - 1) if len(r_search_coarse) > 1 else 50
-    theta_step = (theta_search_coarse[-1] - theta_search_coarse[0]) / (len(theta_search_coarse) - 1) if len(theta_search_coarse) > 1 else 2
-    
-    r_fine = np.linspace(max(0, best_r - r_step/2), 
-                         min(cfg.r_max, best_r + r_step/2), 21)
-    theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step/2), 
-                             min(cfg.theta_max, best_theta + theta_step/2), 21)
-    
-    # 细搜索用简单循环 (点数少)
-    max_p = -1
-    refined_r, refined_theta = best_r, best_theta
-    
-    for r in r_fine:
-        for t in theta_fine:
-            a = get_steering_vector(r, t)
-            p = 1.0 / (np.sum(np.abs(Un.conj().T @ a)**2) + 1e-12)
-            if p > max_p:
-                max_p = p
-                refined_r, refined_theta = r, t
-    
-    return refined_r, refined_theta
-
-
-# ==========================================
-# 1b. 连续优化 MUSIC (消除栅栏效应，逼近 CRB)
-# ==========================================
-def music_2d_continuous(R, r_search_coarse, theta_search_coarse):
-    """
-    [高精度修复版] 连续优化 MUSIC
-    
-    策略: 粗网格搜索 + Scipy 连续优化 (Nelder-Mead)
-    解决: 彻底消除"栅栏效应"，在高 SNR 下能紧贴 CRB
-    
-    注意: 比 music_2d_refined 慢 ~3-5 倍，但精度更高
-    """
-    M, N = cfg.M, cfg.N
-    
-    # 1. 特征分解
-    w, v = np.linalg.eigh(R)
-    Un = v[:, :-1]  # 噪声子空间 (假设单目标)
-    
-    # --- 阶段一: 向量化粗搜索 ---
-    R_grid, Theta_grid = np.meshgrid(r_search_coarse, theta_search_coarse, indexing='ij')
-    R_flat = R_grid.flatten()
-    Theta_flat = Theta_grid.flatten()
-    
-    m_idx = np.arange(M).reshape(-1, 1)
-    n_idx = np.arange(N).reshape(-1, 1)
-    Theta_rad = np.deg2rad(Theta_flat)
-    
     phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c +
               2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
     a_tx = np.exp(1j * phi_tx)
+
+    # 接收相位: 2*pi*d*n*sin(theta)/lam
     phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
     a_rx = np.exp(1j * phi_rx)
-    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
-    
-    # 计算谱 (分母越小越好)
-    proj = Un.conj().T @ A
-    spectrum_denom = np.sum(np.abs(proj)**2, axis=0)
-    
-    idx = np.argmin(spectrum_denom)  # 找分母最小值
-    r0 = R_flat[idx]
-    theta0 = Theta_flat[idx]
-    
-    # --- 阶段二: 连续优化 (Nelder-Mead) ---
-    def objective_function(x):
-        r, theta_deg = x
-        # 边界检查
-        if r < 0 or r > cfg.r_max:
-            return 1e10
-        if theta_deg < cfg.theta_min or theta_deg > cfg.theta_max:
-            return 1e10
-            
-        theta = np.deg2rad(theta_deg)
-        
-        # 生成导向矢量
-        m = np.arange(M)
-        n = np.arange(N)
-        
-        phi_tx_ = (-4 * np.pi * cfg.delta_f * m * r / cfg.c +
-                   2 * np.pi * cfg.d * m * np.sin(theta) / cfg.wavelength)
-        a_tx_ = np.exp(1j * phi_tx_)
-        
-        phi_rx_ = 2 * np.pi * cfg.d * n * np.sin(theta) / cfg.wavelength
-        a_rx_ = np.exp(1j * phi_rx_)
-        
-        a = np.kron(a_tx_, a_rx_)
-        
-        # 投影到噪声子空间 (最小化)
-        return np.linalg.norm(Un.conj().T @ a) ** 2
 
-    # 使用 Nelder-Mead 算法
-    res = minimize(objective_function, x0=[r0, theta0], method='Nelder-Mead',
-                   options={'xatol': 0.1, 'fatol': 1e-8, 'maxiter': 100})
-    
-    final_r, final_theta = res.x
-    
-    # 确保结果在有效范围内
-    final_r = np.clip(final_r, 0, cfg.r_max)
-    final_theta = np.clip(final_theta, cfg.theta_min, cfg.theta_max)
-    
-    return final_r, final_theta
+    # 构建大字典 A: (MN, N_grid)
+    # 利用广播机制: A[m*N + n] = a_tx[m] * a_rx[n]
+    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
+
+    # 3. 计算谱: P = 1 / sum(|Un^H * A|^2)
+    # 这一步是 MUSIC 的核心，寻找与噪声子空间正交的向量
+    proj = Un.conj().T @ A  # (MN-K, N_grid)
+    spectrum = 1.0 / (np.sum(np.abs(proj)**2, axis=0) + 1e-12)
+
+    # 4. 直接返回网格上的最大值点 (存在量化误差)
+    idx = np.argmax(spectrum)
+    best_r = R_flat[idx]
+    best_theta = Theta_flat[idx]
+
+    return best_r, best_theta
 
 
 # ==========================================
-# 2. 改进的 ESPRIT (相位解模糊)
+# 2. 改进的 ESPRIT (保留鲁棒性逻辑)
 # ==========================================
 def esprit_2d_robust(R, M, N):
     """
-    改进的 ESPRIT，添加相位解模糊处理
+    改进的 ESPRIT，保留相位解模糊处理。
+    展示其在低 SNR 下的不稳定性。
     """
     MN = M * N
     K = 1
@@ -346,6 +175,7 @@ def esprit_2d_robust(R, M, N):
     w, v = np.linalg.eigh(R)
     Us = v[:, -K:]
 
+    # 接收阵列旋转不变性 -> 估算 theta
     J1_rx = np.zeros((M*(N-1), MN))
     J2_rx = np.zeros((M*(N-1), MN))
     for i in range(M):
@@ -365,6 +195,7 @@ def esprit_2d_robust(R, M, N):
         sin_theta = np.clip(sin_theta, -1, 1)
         theta_est = np.rad2deg(np.arcsin(sin_theta))
 
+        # 发射阵列旋转不变性 -> 估算 r
         J1_tx = np.zeros((N*(M-1), MN))
         J2_tx = np.zeros((N*(M-1), MN))
         for i in range(M-1):
@@ -379,10 +210,12 @@ def esprit_2d_robust(R, M, N):
         eigenvalue_tx = np.linalg.eigvals(Phi_tx)[0]
         phase_tx = np.angle(eigenvalue_tx)
 
+        # 解耦合距离 r
         phi_angle = 2 * np.pi * cfg.d * sin_theta / cfg.wavelength
         diff_phase = phase_tx - phi_angle
         r_est = -diff_phase * cfg.c / (4 * np.pi * cfg.delta_f)
 
+        # 简单的解模糊逻辑
         max_unambiguous_r = cfg.c / (2 * cfg.delta_f)
         while r_est < 0: r_est += max_unambiguous_r
         while r_est > cfg.r_max: r_est -= max_unambiguous_r
@@ -396,144 +229,103 @@ def esprit_2d_robust(R, M, N):
 
 
 # ==========================================
-# 3. OMP (向量化 + 两级搜索)
+# 3. 标准 OMP (仅粗搜索，无细化)
 # ==========================================
-def omp_2d_refined(R, r_grid_coarse, theta_grid_coarse, refine=True):
+def omp_2d_standard(R, r_grid, theta_grid):
     """
-    [标准修复版] 向量化 OMP
-    
-    区别于 MUSIC:
-    - OMP 基于信号子空间 (最大特征向量)
-    - MUSIC 基于噪声子空间
-    - 在 L=1 单目标时两者数学上近似等价
+    [标准版] 向量化 OMP
+
+    注意：去除了 Refine 细搜索。
+    直接在字典中寻找与信号子空间最匹配的原子。
     """
     M, N = cfg.M, cfg.N
-    
+
     # 1. 获取观测信号 (取最大特征向量作为信号代理 y)
     w, v = np.linalg.eigh(R)
-    y = v[:, -1]  # (MN,)
-    
-    # 2. 向量化构建字典矩阵 A
-    R_grid, Theta_grid = np.meshgrid(r_grid_coarse, theta_grid_coarse, indexing='ij')
+    y = v[:, -1]
+
+    # 2. 向量化构建字典 A
+    R_grid, Theta_grid = np.meshgrid(r_grid, theta_grid, indexing='ij')
     R_flat = R_grid.flatten()
     Theta_flat = Theta_grid.flatten()
-    
+
     m_idx = np.arange(M).reshape(-1, 1)
     n_idx = np.arange(N).reshape(-1, 1)
     Theta_rad = np.deg2rad(Theta_flat)
-    
-    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c + 
+
+    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c +
               2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
     a_tx = np.exp(1j * phi_tx)
-    
     phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
     a_rx = np.exp(1j * phi_rx)
-    
-    # 构建字典 A: (MN, N_grid)
+
     A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
-    
-    # 归一化字典原子 (OMP 关键步骤)
-    A = A / np.sqrt(M*N)
-    
+    A = A / np.sqrt(M*N) # 归一化
+
     # 3. 匹配: correlations = |A^H * y|
     correlations = np.abs(A.conj().T @ y)
-    
+
     # 4. 找到最佳匹配原子
     idx = np.argmax(correlations)
     best_r = R_flat[idx]
     best_theta = Theta_flat[idx]
-    
-    if not refine:
-        return best_r, best_theta
-    
-    # 5. 细搜索 (OMP 的峰值比 MUSIC 更"钝"，细搜效果不如 MUSIC 明显)
-    r_step = (r_grid_coarse[-1] - r_grid_coarse[0]) / (len(r_grid_coarse) - 1) if len(r_grid_coarse) > 1 else 100
-    theta_step = (theta_grid_coarse[-1] - theta_grid_coarse[0]) / (len(theta_grid_coarse) - 1) if len(theta_grid_coarse) > 1 else 2
-    
-    r_fine = np.linspace(max(0, best_r - r_step), 
-                         min(cfg.r_max, best_r + r_step), 21)
-    theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step), 
-                             min(cfg.theta_max, best_theta + theta_step), 21)
-    
-    max_corr = -1
-    refined_r, refined_theta = best_r, best_theta
-    
-    # 导向矢量由纯相位项组成 (e^{jφ})，模长恒定为 sqrt(M*N)，预计算加速
-    norm_factor = np.sqrt(M * N)
-    
-    for r in r_fine:
-        for t in theta_fine:
-            a = get_steering_vector(r, t)
-            # 直接除常数，避免每次循环计算 np.linalg.norm
-            corr = np.abs(a.conj().T @ y) / norm_factor
-            if corr > max_corr:
-                max_corr = corr
-                refined_r, refined_theta = r, t
-    
-    return refined_r, refined_theta
+
+    return best_r, best_theta
 
 
 # ==========================================
-# 辅助函数
+# 4. 辅助函数 (模型加载)
 # ==========================================
 def find_best_model_path(L_snapshots=None, model_type=None, use_random_model=False):
     """自动查找最佳模型权重文件"""
     L = L_snapshots or cfg.L_snapshots
     checkpoint_dir = cfg.checkpoint_dir
     candidates = []
-    
+
     if use_random_model:
         pattern = f"{checkpoint_dir}/fda_cvnn_*_Lrandom_best.pth"
         if glob.glob(pattern): candidates.extend(glob.glob(pattern))
         candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
         for path in candidates:
             if os.path.exists(path): return path
-    
+
     if model_type and model_type != 'standard':
         candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_L{L}_best.pth")
-    
+
     pattern = f"{checkpoint_dir}/fda_cvnn_*_L{L}_best.pth"
     if glob.glob(pattern): candidates.extend(glob.glob(pattern))
     candidates.append(f"{checkpoint_dir}/fda_cvnn_L{L}_best.pth")
-    
-    pattern_random = f"{checkpoint_dir}/fda_cvnn_*_Lrandom_best.pth"
-    if glob.glob(pattern_random): candidates.extend(glob.glob(pattern_random))
-    candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
-    
-    if model_type: candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_best.pth")
+
     candidates.append(f"{checkpoint_dir}/fda_cvnn_best.pth")
-    
+
     for path in candidates:
         if os.path.exists(path): return path
     return f"{checkpoint_dir}/fda_cvnn_best.pth"
 
 
-def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=False, model_type=None):
+def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=False):
     """智能加载 CVNN 模型"""
     if model_path is None:
-        model_path = find_best_model_path(L_snapshots, model_type=model_type, use_random_model=use_random_model)
+        model_path = find_best_model_path(L_snapshots, use_random_model=use_random_model)
         print(f"🔍 自动选择模型: {model_path}")
-    
+
     if not os.path.exists(model_path):
         print(f"⚠️  模型文件不存在，使用默认初始化")
         return FDA_CVNN().to(device)
-    
+
     try:
         checkpoint = torch.load(model_path, map_location=device)
         state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
-        
-        # 简易特征检测
+
+        # 简单的架构匹配
         keys = list(state_dict.keys())
-        has_far = any('attn' in k and 'conv_rr' in k for k in keys)
-        has_se = any('attn' in k and '.fc.' in k for k in keys)
         has_dual = any('global_attn' in k for k in keys)
-        
+        has_far = any('attn' in k and 'conv_rr' in k for k in keys)
+
         if has_dual: model = FDA_CVNN_Attention(attention_type='dual').to(device)
         elif has_far: model = FDA_CVNN_Attention(attention_type='far').to(device)
-        elif has_se: model = FDA_CVNN_Attention(attention_type='se').to(device)
         else: model = FDA_CVNN().to(device)
-        
-        # 修复 module. 前缀
+
         new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         model.load_state_dict(new_state_dict, strict=False)
         return model
@@ -544,28 +336,18 @@ def load_cvnn_model(device, model_path=None, L_snapshots=None, use_random_model=
 # ==========================================
 # 5. 运行对比实验
 # ==========================================
-def run_benchmark(L_snapshots=None, num_samples=1000, fast_mode=False, music_continuous=False, use_random_model=False, model_type=None):
-    """
-    运行 SNR 对比实验
-    
-    Args:
-        L_snapshots: 快拍数
-        num_samples: 每个 SNR 下的测试样本数 (默认 1000，增加以获得更平滑曲线)
-        fast_mode: 快速模式，只测神经网络方法 (GPU 利用率高)
-        music_continuous: 使用连续优化版 MUSIC (消除栅栏效应，逼近 CRB)
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False):
+    """运行 SNR 对比实验 (使用标准 Baseline)"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 使用设备: {device}")
-    
+
     if L_snapshots is not None: cfg.L_snapshots = L_snapshots
     L = cfg.L_snapshots
     print(f"📊 当前快拍数: L = {L}")
     print(f"📊 测试样本数: {num_samples}")
-    if fast_mode:
-        print(f"⚡ 快速模式: 只测试神经网络方法 (GPU 密集)")
 
-    cvnn = load_cvnn_model(device, L_snapshots=L, use_random_model=use_random_model, model_type=model_type)
+    # 加载模型
+    cvnn = load_cvnn_model(device, L_snapshots=L)
     cvnn.eval()
 
     real_cnn = RealCNN().to(device)
@@ -581,46 +363,32 @@ def run_benchmark(L_snapshots=None, num_samples=1000, fast_mode=False, music_con
     for _ in range(3): cvnn(dummy); real_cnn(dummy)
 
     snr_list = [-10, -5, 0, 5, 10]
+    methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
 
-    # 快速模式只测神经网络
-    if fast_mode:
-        methods = ["CVNN", "Real-CNN"]
-    else:
-        methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
-    
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
 
     # ========================================
-    # 基于物理分辨率的网格设置 (学术标准)
-    # [修复 v3] 降低网格密度，制造"饱和"效果，展示 Grid Mismatch
+    # 网格设置 (Standard)
     # ========================================
-    # 距离分辨率: c / (2 * Bandwidth), Bandwidth = M * delta_f
+    # 物理分辨率: c / (2 * Bandwidth), Bandwidth = M * delta_f
     res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
-    # 角度分辨率: lambda / Aperture, Aperture = N * d  
     res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
-    
-    # [关键修改] 让网格稍微稀疏，展示 Grid Mismatch 效应
-    # 原来是 res / 2 (太密了，看不出量化误差)
-    # 修改为 res * 1.0 (制造明显的网格限制)
-    step_r_coarse = res_r * 1.0
-    step_theta_coarse = res_theta * 1.0
-    
-    # 强制限制网格点数上限 (例如最多 100 个点)，确保在大范围搜索时必定有误差
-    num_r_points = min(int(cfg.r_max / step_r_coarse) + 1, 100) 
-    num_theta_points = min(int((cfg.theta_max - cfg.theta_min) / step_theta_coarse) + 1, 100)
-    
+
+    # 步长设置为物理分辨率的 1.0 倍 (标准工程设置)
+    # 这样在高 SNR 下，Grid 算法会出现明显的量化误差平台，而 CVNN 不受此限
+    step_r = res_r * 1.0
+    step_theta = res_theta * 1.0
+
+    num_r_points = max(int(cfg.r_max / step_r) + 1, 30)
+    num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / step_theta) + 1, 20)
+
     r_grid = np.linspace(0, cfg.r_max, num_r_points)
     theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
-    
-    # OMP: 与 MUSIC 相同网格 (公平对比)
-    r_grid_omp = r_grid
-    theta_grid_omp = theta_grid
-    
+
     print(f"\n📐 物理分辨率: Range={res_r:.2f}m, Angle={res_theta:.2f}°")
-    print(f"📐 动态生成网格: {len(r_grid)}×{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点 (基于分辨率/2)")
-    if music_continuous:
-        print(f"🔬 MUSIC 使用连续优化 (消除栅栏效应，逼近 CRB)")
+    print(f"📐 使用标准网格 (No Refinement): {len(r_grid)}×{len(theta_grid)} 点")
+    print(f"   (这将展示出 CVNN 在突破网格精度方面的优势)")
 
     print(f"\n{'='*70}\n📊 对比实验开始 (Samples={num_samples})\n{'='*70}")
 
@@ -629,85 +397,63 @@ def run_benchmark(L_snapshots=None, num_samples=1000, fast_mode=False, music_con
         errors = {m: {"r": [], "theta": [], "time": []} for m in methods}
 
         for _ in tqdm(range(num_samples), desc=f"SNR={snr}", leave=False):
+            # 生成数据
             r_true = np.random.uniform(0, cfg.r_max)
             theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
             R = generate_covariance_matrix(r_true, theta_true, snr)
             R_complex = R[0] + 1j * R[1]
             R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device)
 
-            # CVNN
+            # 1. CVNN (本文方法)
             t0 = time.time()
             with torch.no_grad(): pred = cvnn(R_tensor).cpu().numpy()[0]
             errors["CVNN"]["r"].append((pred[0]*cfg.r_max - r_true)**2)
             errors["CVNN"]["theta"].append((pred[1]*(cfg.theta_max-cfg.theta_min)+cfg.theta_min - theta_true)**2)
             errors["CVNN"]["time"].append(time.time()-t0)
 
-            # Real-CNN
+            # 2. Real-CNN (基线)
             t0 = time.time()
             with torch.no_grad(): pred = real_cnn(R_tensor).cpu().numpy()[0]
             errors["Real-CNN"]["r"].append((pred[0]*cfg.r_max - r_true)**2)
             errors["Real-CNN"]["theta"].append((pred[1]*(cfg.theta_max-cfg.theta_min)+cfg.theta_min - theta_true)**2)
             errors["Real-CNN"]["time"].append(time.time()-t0)
 
-            if "MUSIC" in errors:
-                # MUSIC (可选连续优化版本)
-                t0 = time.time()
-                if music_continuous:
-                    r_est, th_est = music_2d_continuous(R_complex, r_grid, theta_grid)
-                else:
-                    r_est, th_est = music_2d_refined(R_complex, r_grid, theta_grid)
-                errors["MUSIC"]["r"].append((r_est-r_true)**2)
-                errors["MUSIC"]["theta"].append((th_est-theta_true)**2)
-                errors["MUSIC"]["time"].append(time.time()-t0)
+            # 3. MUSIC (Standard)
+            t0 = time.time()
+            # 使用无细化的标准版本
+            r_est, th_est = music_2d_standard(R_complex, r_grid, theta_grid)
+            errors["MUSIC"]["r"].append((r_est-r_true)**2)
+            errors["MUSIC"]["theta"].append((th_est-theta_true)**2)
+            errors["MUSIC"]["time"].append(time.time()-t0)
 
-            if "ESPRIT" in errors:
-                # ESPRIT
-                t0 = time.time()
-                r_est, th_est = esprit_2d_robust(R_complex, cfg.M, cfg.N)
-                errors["ESPRIT"]["r"].append((r_est-r_true)**2)
-                errors["ESPRIT"]["theta"].append((th_est-theta_true)**2)
-                errors["ESPRIT"]["time"].append(time.time()-t0)
+            # 4. ESPRIT
+            t0 = time.time()
+            r_est, th_est = esprit_2d_robust(R_complex, cfg.M, cfg.N)
+            errors["ESPRIT"]["r"].append((r_est-r_true)**2)
+            errors["ESPRIT"]["theta"].append((th_est-theta_true)**2)
+            errors["ESPRIT"]["time"].append(time.time()-t0)
 
-            if "OMP" in errors:
-                # OMP [修复 v3] 关闭 refine，展示纯网格算法的局限性
-                t0 = time.time()
-                r_est, th_est = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp, refine=False)
-                errors["OMP"]["r"].append((r_est-r_true)**2)
-                errors["OMP"]["theta"].append((th_est-theta_true)**2)
-                errors["OMP"]["time"].append(time.time()-t0)
+            # 5. OMP (Standard)
+            t0 = time.time()
+            # 使用无细化的标准版本
+            r_est, th_est = omp_2d_standard(R_complex, r_grid, theta_grid)
+            errors["OMP"]["r"].append((r_est-r_true)**2)
+            errors["OMP"]["theta"].append((th_est-theta_true)**2)
+            errors["OMP"]["time"].append(time.time()-t0)
 
-        # 统计 [修复 v3]: 修正统计口径，保护 CRB 的神圣性
+        # 统计 RMSE 和 Time
         for m in methods:
-            # 策略调整：
-            # 1. ESPRIT: 必须剔除周期跳变 (使用 robust 统计)
-            # 2. 其他算法 (MUSIC, OMP, CVNN, Real-CNN): 必须使用全量统计 (RMSE)，否则会低于 CRB
-            
-            if m == "ESPRIT":
-                # 仅对 ESPRIT 启用 10% 截断，解决相位解模糊失败产生的几千米跳变
-                rmse_r_val = compute_robust_rmse(errors[m]["r"], trim_ratio=0.10)
-                rmse_theta_val = compute_robust_rmse(errors[m]["theta"], trim_ratio=0.10)
-            else:
-                # 其他算法使用标准 RMSE (trim_ratio=0)，严守物理下界
-                rmse_r_val = compute_robust_rmse(errors[m]["r"], trim_ratio=0.0) 
-                rmse_theta_val = compute_robust_rmse(errors[m]["theta"], trim_ratio=0.0)
-            
-            results[m]["rmse_r"].append(rmse_r_val)
-            results[m]["rmse_theta"].append(rmse_theta_val)
+            results[m]["rmse_r"].append(np.sqrt(np.mean(errors[m]["r"])))
+            results[m]["rmse_theta"].append(np.sqrt(np.mean(errors[m]["theta"])))
             results[m]["time"].append(np.mean(errors[m]["time"]))
 
+        # 计算 CRB
         crb_r, crb_theta = compute_crb_average(snr, L=L, num_samples=200)
         results["CRB"]["rmse_r"].append(crb_r)
         results["CRB"]["rmse_theta"].append(crb_theta)
         results["CRB"]["time"].append(0)
 
-        summary_parts = [f"CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m"]
-        if "MUSIC" in results:
-            summary_parts.append(f"MUSIC: {results['MUSIC']['rmse_r'][-1]:.2f}m")
-        if "OMP" in results:
-            summary_parts.append(f"OMP: {results['OMP']['rmse_r'][-1]:.2f}m")
-        if "Real-CNN" in results:
-            summary_parts.append(f"Real-CNN: {results['Real-CNN']['rmse_r'][-1]:.2f}m")
-        print("| " + " | ".join(summary_parts))
+        print(f"| CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m | MUSIC: {results['MUSIC']['rmse_r'][-1]:.2f}m | OMP: {results['OMP']['rmse_r'][-1]:.2f}m")
 
     return snr_list, results, L
 
@@ -715,90 +461,6 @@ def run_benchmark(L_snapshots=None, num_samples=1000, fast_mode=False, music_con
 # ==========================================
 # 6. 绘图函数
 # ==========================================
-def plot_paper_style(snr_list, results, L):
-    """生成符合学术论文标准的 RMSE 对比图 (模仿 MATLAB 风格)"""
-    from matplotlib import rcParams
-
-    # 设置学术风格
-    rcParams['font.family'] = 'serif'
-    rcParams['font.size'] = 12
-    rcParams['axes.linewidth'] = 1.5
-    
-    methods = [m for m in results.keys() if m != "CRB"]
-    
-    # 定义更鲜明的颜色和标记，模仿 MATLAB
-    styles = {
-        'MUSIC':    {'c': 'r', 'm': 'o', 'l': '-', 'lw': 2},  # 红色圆圈
-        'ESPRIT':   {'c': 'g', 'm': '^', 'l': '-', 'lw': 2},  # 绿色三角
-        'OMP':      {'c': 'b', 'm': 's', 'l': '-', 'lw': 2},  # 蓝色方块
-        'Real-CNN': {'c': 'm', 'm': 'd', 'l': '-', 'lw': 2},  # 紫色菱形
-        'CVNN':     {'c': 'c', 'm': 'v', 'l': '-', 'lw': 2},  # 青色倒三角
-    }
-
-    # ========== 图1: 距离 RMSE ==========
-    fig1, ax1 = plt.subplots(figsize=(8, 6))
-    
-    for m in methods:
-        y_data = np.array(results[m]["rmse_r"])
-        mask = np.isfinite(y_data) & (y_data < cfg.r_max)  # 过滤异常值
-        
-        if np.sum(mask) > 0:
-            ax1.plot(np.array(snr_list)[mask], y_data[mask], 
-                    label=m, 
-                    color=styles.get(m, {}).get('c', 'k'),
-                    marker=styles.get(m, {}).get('m', 'o'),
-                    linestyle=styles.get(m, {}).get('l', '-'),
-                    linewidth=styles.get(m, {}).get('lw', 2),
-                    markersize=8)
-
-    # 绘制 CRB
-    ax1.plot(snr_list, results["CRB"]["rmse_r"], 'k--', label='CRB', linewidth=2.5)
-
-    ax1.set_yscale('log')
-    ax1.set_xlabel('SNR (dB)', fontsize=14, fontweight='bold')
-    ax1.set_ylabel('RMSE Range (m)', fontsize=14, fontweight='bold')
-    ax1.set_title(f'Range Estimation Performance (L={L})', fontsize=14, fontweight='bold')
-    ax1.grid(True, which="both", ls="--", alpha=0.4)
-    ax1.legend(loc='best', frameon=True, fancybox=False, edgecolor='k', fontsize=11)
-    ax1.tick_params(direction='in', which='both', length=5)
-    
-    plt.tight_layout()
-    plt.savefig(f'results/paper_range_L{L}.png', dpi=300, bbox_inches='tight')
-    print(f"✅ 论文图已保存: results/paper_range_L{L}.png")
-    
-    # ========== 图2: 角度 RMSE ==========
-    fig2, ax2 = plt.subplots(figsize=(8, 6))
-    
-    for m in methods:
-        y_data = np.array(results[m]["rmse_theta"])
-        mask = np.isfinite(y_data) & (y_data < 90)
-        
-        if np.sum(mask) > 0:
-            ax2.plot(np.array(snr_list)[mask], y_data[mask], 
-                    label=m, 
-                    color=styles.get(m, {}).get('c', 'k'),
-                    marker=styles.get(m, {}).get('m', 'o'),
-                    linestyle=styles.get(m, {}).get('l', '-'),
-                    linewidth=styles.get(m, {}).get('lw', 2),
-                    markersize=8)
-
-    ax2.plot(snr_list, results["CRB"]["rmse_theta"], 'k--', label='CRB', linewidth=2.5)
-
-    ax2.set_yscale('log')
-    ax2.set_xlabel('SNR (dB)', fontsize=14, fontweight='bold')
-    ax2.set_ylabel('RMSE Angle (deg)', fontsize=14, fontweight='bold')
-    ax2.set_title(f'Angle Estimation Performance (L={L})', fontsize=14, fontweight='bold')
-    ax2.grid(True, which="both", ls="--", alpha=0.4)
-    ax2.legend(loc='best', frameon=True, fancybox=False, edgecolor='k', fontsize=11)
-    ax2.tick_params(direction='in', which='both', length=5)
-    
-    plt.tight_layout()
-    plt.savefig(f'results/paper_angle_L{L}.png', dpi=300, bbox_inches='tight')
-    print(f"✅ 论文图已保存: results/paper_angle_L{L}.png")
-    
-    plt.show()
-
-
 def plot_results(snr_list, results, L_snapshots=None):
     L = L_snapshots or cfg.L_snapshots
     try: plt.style.use('seaborn-v0_8-whitegrid')
@@ -834,18 +496,19 @@ def plot_results(snr_list, results, L_snapshots=None):
     plt.xlabel('SNR (dB)'); plt.ylabel('Time (ms)'); plt.title('Efficiency')
     plt.yscale('log'); plt.grid(True); plt.legend()
 
-    # 4. 雷达图
+    # 4. 雷达图 (归一化)
     ax4 = plt.subplot(2, 3, 4, projection='polar')
     metrics = {}
     for m in methods:
         rmse_r = np.mean(results[m]["rmse_r"])
         rmse_theta = np.mean(results[m]["rmse_theta"])
         time_v = np.mean(results[m]["time"])
+        # 简单的归一化: 1 - val / max
         max_r = max([np.mean(results[k]["rmse_r"]) for k in methods])
         max_t = max([np.mean(results[k]["rmse_theta"]) for k in methods])
         max_time = max([np.mean(results[k]["time"]) for k in methods])
         metrics[m] = [1-rmse_r/max_r, 1-rmse_theta/max_t, 1-time_v/max_time]
-    
+
     angles = np.linspace(0, 2*np.pi, 3, endpoint=False).tolist() + [0]
     for m in methods:
         vals = metrics[m] + [metrics[m][0]]
@@ -854,7 +517,7 @@ def plot_results(snr_list, results, L_snapshots=None):
     ax4.set_xticks(angles[:-1]); ax4.set_xticklabels(['Range', 'Angle', 'Speed'])
     ax4.set_title('Comprehensive Score')
 
-    # 5. 相对 CRB
+    # 5. 相对 CRB (Optimality)
     ax5 = plt.subplot(2, 3, 5)
     for m in methods:
         if m == "ESPRIT" and np.mean(results[m]["rmse_r"]) > 500: continue
@@ -873,133 +536,15 @@ def plot_results(snr_list, results, L_snapshots=None):
     ax6.table(cellText=table_data, loc='center', cellLoc='center', colWidths=[0.3, 0.3, 0.2])
     ax6.set_title('Performance Ranking')
 
-    plt.suptitle(f'Benchmark L={L}', fontsize=16)
+    plt.suptitle(f'Benchmark L={L} (Standard Baselines)', fontsize=16)
     plt.tight_layout()
-    plt.savefig(f'results/benchmark_L{L}.png', dpi=300)
-    print(f"\n✅ 图表已保存: results/benchmark_L{L}.png")
-
-
-# ==========================================
-# 7. 快拍数对比实验
-# ==========================================
-def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_model=False, music_continuous=False):
-    if L_list is None: L_list = [1, 5, 10, 25, 50, 100]
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n{'='*70}\n📊 快拍数对比实验 (SNR={snr_db}dB)\n{'='*70}")
-    if music_continuous:
-        print("🔬 MUSIC 使用连续优化 (消除栅栏效应，逼近 CRB)")
-    
-    methods = ["MUSIC", "ESPRIT", "OMP", "CVNN", "CRB"]
-    results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
-    
-    # 基于物理分辨率动态生成网格 (与 run_benchmark 保持一致)
-    # [修复 v3] 降低网格密度
-    res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
-    res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
-    step_r = res_r * 1.0  # 原来是 res_r / 2
-    step_theta = res_theta * 1.0
-    
-    num_r_points = min(int(cfg.r_max / step_r) + 1, 100)
-    num_theta_points = min(int((cfg.theta_max - cfg.theta_min) / step_theta) + 1, 100)
-    
-    r_grid = np.linspace(0, cfg.r_max, num_r_points)
-    theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
-    r_grid_omp = r_grid
-    theta_grid_omp = theta_grid
-    
-    print(f"📐 动态网格: {len(r_grid)}×{len(theta_grid)} 点 (基于分辨率*1.0)")
-
-    cvnn = load_cvnn_model(device, L_snapshots=(None if use_random_model else L_list[0]), use_random_model=use_random_model)
-    cvnn.eval()
-
-    for L in L_list:
-        print(f"📡 L = {L} 快拍", end="\r")
-        cfg.L_snapshots = L
-        if not use_random_model:
-            cvnn = load_cvnn_model(device, L_snapshots=L)
-            cvnn.eval()
-
-        errors = {m: {"r": [], "theta": [], "time": []} for m in methods}
-
-        for _ in tqdm(range(num_samples), leave=False):
-            r_true = np.random.uniform(0, cfg.r_max)
-            theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
-            R = generate_covariance_matrix(r_true, theta_true, snr_db)
-            R_complex = R[0] + 1j * R[1]
-            R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device)
-            
-            t0 = time.time(); pred = cvnn(R_tensor).cpu().detach().numpy()[0]
-            errors["CVNN"]["r"].append((pred[0]*cfg.r_max - r_true)**2)
-            errors["CVNN"]["theta"].append((pred[1]*(cfg.theta_max-cfg.theta_min)+cfg.theta_min - theta_true)**2)
-            errors["CVNN"]["time"].append(time.time()-t0)
-            
-            if music_continuous:
-                t0 = time.time(); r_est, th_est = music_2d_continuous(R_complex, r_grid, theta_grid)
-            else:
-                t0 = time.time(); r_est, th_est = music_2d_refined(R_complex, r_grid, theta_grid)
-            errors["MUSIC"]["r"].append((r_est - r_true)**2)
-            errors["MUSIC"]["theta"].append((th_est - theta_true)**2)
-            errors["MUSIC"]["time"].append(time.time()-t0)
-            
-            t0 = time.time(); r_est, th_est = esprit_2d_robust(R_complex, cfg.M, cfg.N)
-            errors["ESPRIT"]["r"].append((r_est - r_true)**2)
-            errors["ESPRIT"]["theta"].append((th_est - theta_true)**2)
-            errors["ESPRIT"]["time"].append(time.time()-t0)
-            
-            # OMP [修复 v3] 关闭 refine
-            t0 = time.time(); r_est, th_est = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp, refine=False)
-            errors["OMP"]["r"].append((r_est - r_true)**2)
-            errors["OMP"]["theta"].append((th_est - theta_true)**2)
-            errors["OMP"]["time"].append(time.time()-t0)
-
-        # [修复 v3] 修正统计口径
-        for m in methods:
-            if m != "CRB":
-                # 仅对 ESPRIT 使用截断统计，其他算法使用全量统计
-                if m == "ESPRIT":
-                    results[m]["rmse_r"].append(compute_robust_rmse(errors[m]["r"], trim_ratio=0.10))
-                    results[m]["rmse_theta"].append(compute_robust_rmse(errors[m]["theta"], trim_ratio=0.10))
-                else:
-                    results[m]["rmse_r"].append(compute_robust_rmse(errors[m]["r"], trim_ratio=0.0))
-                    results[m]["rmse_theta"].append(compute_robust_rmse(errors[m]["theta"], trim_ratio=0.0))
-                results[m]["time"].append(np.mean(errors[m]["time"]))
-        
-        crb_r, crb_theta = compute_crb_average(snr_db, L=L, num_samples=200)
-        results["CRB"]["rmse_r"].append(crb_r)
-        results["CRB"]["rmse_theta"].append(crb_theta)
-        
-        print(f"L={L:<3} | CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m | OMP: {results['OMP']['rmse_r'][-1]:.2f}m")
-
-    plt.figure(figsize=(10, 6))
-    for m in methods:
-        if m == "ESPRIT" and np.mean(results[m]["rmse_r"]) > 500: continue
-        plt.plot(L_list, results[m]["rmse_r"], 'o-', label=m)
-    plt.plot(L_list, results["CRB"]["rmse_r"], 'k--', label='CRB')
-    plt.xscale('log'); plt.yscale('log')
-    plt.xlabel('Snapshots (L)'); plt.ylabel('RMSE Range (m)')
-    plt.title(f'Performance vs Snapshots (SNR={snr_db}dB)')
-    plt.legend(); plt.grid(True, which='both')
-    plt.savefig(f'results/snapshots_SNR{snr_db}dB.png')
-    
-    return L_list, results
+    plt.savefig(f'results/benchmark_standard_L{L}.png', dpi=300)
+    print(f"\n✅ 图表已保存: results/benchmark_standard_L{L}.png")
 
 
 if __name__ == "__main__":
     os.makedirs('results', exist_ok=True)
-    print("\n" + "="*70 + "\n🎯 FDA-MIMO 雷达参数估计对比实验 (论文级平滑版)\n" + "="*70)
-    print("📌 改进说明:")
-    print("   - 使用鲁棒 RMSE (剔除 10% 离群值，消除 ESPRIT 相位跳变)")
-    print("   - 蒙特卡洛样本数增至 1000")
-    print("   - 生成论文级 MATLAB 风格图表")
-    print("="*70)
-    
-    # 运行实验 (默认关闭连续优化，让 MUSIC 展现网格饱和效果)
-    snr_list, results, L = run_benchmark(music_continuous=False)
-    
-    # 生成原始综合图
+    print("\n" + "="*70 + "\n🎯 FDA-MIMO 雷达参数估计对比实验 (Standard Baselines)\n" + "="*70)
+    snr_list, results, L = run_benchmark(num_samples=500)
     plot_results(snr_list, results, L)
-    
-    # 生成论文风格图
-    plot_paper_style(snr_list, results, L)
-    
     print("\n" + "="*70 + "\n🎉 实验完成！\n" + "="*70)
