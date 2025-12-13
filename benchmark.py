@@ -387,36 +387,32 @@ def esprit_2d_robust(R, M, N):
 
 
 # ==========================================
-# 3. OMP (标准稀疏重构，使用独立粗网格)
+# 3. OMP (标准稀疏重构，与MUSIC使用相同网格确保公平对比)
 # ==========================================
-def omp_2d_refined(R, r_grid_coarse, theta_grid_coarse, refine=True):
+def omp_2d_refined(R, r_grid, theta_grid, refine=True):
     """
     [公平对比版] OMP 稀疏重构
     
-    修改说明:
-    - 使用独立的粗网格 (不共享 MUSIC 的细网格)
-    - 单次网格搜索，不做细搜索 (体现 OMP 的栅栏效应)
-    - 这样更符合 OMP 作为"低复杂度替代方案"的定位
+    说明:
+    - 与 MUSIC 使用相同网格，确保对比公平性
+    - OMP 基于信号子空间 (最大特征向量做匹配滤波)
+    - MUSIC 基于噪声子空间 (正交投影)
+    - 两者在单目标场景下理论性能接近
     
-    区别于 MUSIC:
-    - OMP 基于信号子空间 (最大特征向量)
-    - MUSIC 基于噪声子空间
+    学术说明:
+    - OMP 的优势在于多目标场景和计算复杂度
+    - 单目标场景下 OMP ≈ 匹配滤波器，性能接近 MUSIC
     """
     M, N = cfg.M, cfg.N
-    
-    # OMP 使用独立的粗网格 (体现其低复杂度特性)
-    # 典型 OMP 网格: 50x30 点 (比 MUSIC 粗很多)
-    r_grid_omp = np.linspace(0, cfg.r_max, 50)
-    theta_grid_omp = np.linspace(cfg.theta_min, cfg.theta_max, 30)
     
     # 1. 获取观测信号 (取最大特征向量作为信号代理 y)
     w, v = np.linalg.eigh(R)
     y = v[:, -1]  # (MN,)
     
-    # 2. 向量化构建字典矩阵 A (使用 OMP 自己的粗网格)
-    R_grid, Theta_grid = np.meshgrid(r_grid_omp, theta_grid_omp, indexing='ij')
-    R_flat = R_grid.flatten()
-    Theta_flat = Theta_grid.flatten()
+    # 2. 向量化构建字典矩阵 A (使用与MUSIC相同的网格)
+    R_grid_mesh, Theta_grid_mesh = np.meshgrid(r_grid, theta_grid, indexing='ij')
+    R_flat = R_grid_mesh.flatten()
+    Theta_flat = Theta_grid_mesh.flatten()
     
     m_idx = np.arange(M).reshape(-1, 1)
     n_idx = np.arange(N).reshape(-1, 1)
@@ -438,15 +434,36 @@ def omp_2d_refined(R, r_grid_coarse, theta_grid_coarse, refine=True):
     # 3. 匹配: correlations = |A^H * y|
     correlations = np.abs(A.conj().T @ y)
     
-    # 4. 找到最佳匹配原子
+    # 4. 找到最佳匹配原子 (粗搜索)
     idx = np.argmax(correlations)
     best_r = R_flat[idx]
     best_theta = Theta_flat[idx]
     
-    # OMP 不做细搜索，直接返回粗网格结果
-    # 这体现了 OMP 的"栅栏效应" (Grid Straddling Loss)
-    # 与 MUSIC 的两级搜索形成对比
-    return best_r, best_theta
+    if not refine:
+        return best_r, best_theta
+    
+    # 5. 细搜索 (与 MUSIC 相同策略，确保公平)
+    r_step = (r_grid[-1] - r_grid[0]) / (len(r_grid) - 1) if len(r_grid) > 1 else 50
+    theta_step = (theta_grid[-1] - theta_grid[0]) / (len(theta_grid) - 1) if len(theta_grid) > 1 else 2
+    
+    r_fine = np.linspace(max(0, best_r - r_step/2), 
+                         min(cfg.r_max, best_r + r_step/2), 21)
+    theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step/2), 
+                             min(cfg.theta_max, best_theta + theta_step/2), 21)
+    
+    max_corr = -1
+    refined_r, refined_theta = best_r, best_theta
+    norm_factor = np.sqrt(M * N)
+    
+    for r in r_fine:
+        for t in theta_fine:
+            a = get_steering_vector(r, t)
+            corr = np.abs(a.conj().T @ y) / norm_factor
+            if corr > max_corr:
+                max_corr = corr
+                refined_r, refined_theta = r, t
+    
+    return refined_r, refined_theta
 
 
 # ==========================================
@@ -585,12 +602,9 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     r_grid = np.linspace(0, cfg.r_max, num_r_points)
     theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
     
-    # OMP: 与 MUSIC 相同网格 (公平对比)
-    r_grid_omp = r_grid
-    theta_grid_omp = theta_grid
-    
     print(f"\n📐 物理分辨率: Range={res_r:.2f}m, Angle={res_theta:.2f}°")
     print(f"📐 动态生成网格: {len(r_grid)}×{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点 (基于分辨率/2)")
+    print(f"📐 所有网格搜索方法 (MUSIC/OMP) 使用相同网格，确保公平对比")
     if music_continuous:
         print(f"🔬 MUSIC 使用连续优化 (消除栅栏效应，逼近 CRB)")
 
@@ -653,9 +667,9 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
             errors["ESPRIT"]["time"].append(time.time()-t0)
             sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
 
-            # OMP (使用独立粗网格，不做细搜索)
+            # OMP (与MUSIC使用相同网格，确保公平对比)
             t0 = time.time()
-            r_est_omp, th_est_omp = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp)
+            r_est_omp, th_est_omp = omp_2d_refined(R_complex, r_grid, theta_grid, refine=True)
             errors["OMP"]["r"].append((r_est_omp-r_true)**2)
             errors["OMP"]["theta"].append((th_est_omp-theta_true)**2)
             errors["OMP"]["time"].append(time.time()-t0)
@@ -804,8 +818,6 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     
     r_grid = np.linspace(0, cfg.r_max, num_r_points)
     theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
-    r_grid_omp = r_grid
-    theta_grid_omp = theta_grid
     
     print(f"📐 动态网格: {len(r_grid)}×{len(theta_grid)} 点")
 
@@ -840,8 +852,8 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
             errors["ESPRIT"]["r"].append((r_est - r_true)**2)
             errors["ESPRIT"]["time"].append(time.time()-t0)
             
-            # OMP Modified
-            t0 = time.time(); r_est, _ = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp)
+            # OMP (与MUSIC使用相同网格)
+            t0 = time.time(); r_est, _ = omp_2d_refined(R_complex, r_grid, theta_grid, refine=True)
             errors["OMP"]["r"].append((r_est - r_true)**2)
             errors["OMP"]["time"].append(time.time()-t0)
 
