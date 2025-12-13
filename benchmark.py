@@ -180,7 +180,12 @@ def load_models(device, L):
 # 4. 主流程
 # =========================================================
 def run_benchmark(L_snapshots=None, num_samples=200):
-    if L_snapshots is None: L_snapshots = cfg.L_snapshots
+    # 动态修改全局配置以适配 utils_physics
+    if L_snapshots is not None:
+        cfg.L_snapshots = L_snapshots
+    else:
+        L_snapshots = cfg.L_snapshots
+
     device = cfg.device
 
     print(f"\n🚀 开始评测 (Data Source: utils_physics)")
@@ -218,9 +223,14 @@ def run_benchmark(L_snapshots=None, num_samples=200):
             r_true = np.random.uniform(cfg.r_min, cfg.r_max)
             t_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
 
-            # utils_physics 返回 (2, MN, MN) 和 (MN, MN) 复数矩阵
-            R_tensor, R_complex = generate_covariance_matrix(r_true, t_true, snr, L=L_snapshots)
+            # 修正：utils_physics.generate_covariance_matrix 只返回一个 R_tensor
+            # 并且它不接受 L 参数，它直接读取 cfg.L_snapshots，所以我们在开头修改了 cfg.L_snapshots
+            R_tensor = generate_covariance_matrix(r_true, t_true, snr)
 
+            # 手动重建复数矩阵 (用于传统算法)
+            R_complex = R_tensor[0] + 1j * R_tensor[1]
+
+            # 转换为 Tensor 供神经网络使用
             R_torch = torch.FloatTensor(R_tensor).unsqueeze(0).to(device)
 
             # B. 运行算法
