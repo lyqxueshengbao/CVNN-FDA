@@ -1,15 +1,11 @@
-"""FDA-MIMO 雷达参数估计对比实验 (完整修复版 v2)
-修复说明:
-- CRB: 修复了统计方式，消除奇异值影响，解决 CRB 虚高问题。
-- OMP: 增加了两级搜索 (Coarse + Fine)，解决因网格量化导致的 RMSE "直线" (误差饱和) 问题。
+"""FDA-MIMO 雷达参数估计对比实验
 
 算法清单:
 1. CVNN: 复数神经网络 (本文方法)
 2. Real-CNN: 实数神经网络基线
 3. MUSIC: 子空间方法 (两级搜索)
 4. ESPRIT: 旋转不变性方法
-5. OMP: 稀疏重构方法 (两级搜索) [已修复]
-6. CRB: 克拉美-罗界 (理论下界) [已修复]
+5. CRB: 克拉美-罗界 (理论下界)
 """
 
 import numpy as np
@@ -387,86 +383,6 @@ def esprit_2d_robust(R, M, N):
 
 
 # ==========================================
-# 3. OMP (标准稀疏重构，与MUSIC使用相同网格确保公平对比)
-# ==========================================
-def omp_2d_refined(R, r_grid, theta_grid, refine=True):
-    """
-    [公平对比版] OMP 稀疏重构
-    
-    说明:
-    - 与 MUSIC 使用相同网格，确保对比公平性
-    - OMP 基于信号子空间 (最大特征向量做匹配滤波)
-    - MUSIC 基于噪声子空间 (正交投影)
-    - 两者在单目标场景下理论性能接近
-    
-    学术说明:
-    - OMP 的优势在于多目标场景和计算复杂度
-    - 单目标场景下 OMP ≈ 匹配滤波器，性能接近 MUSIC
-    """
-    M, N = cfg.M, cfg.N
-    
-    # 1. 获取观测信号 (取最大特征向量作为信号代理 y)
-    w, v = np.linalg.eigh(R)
-    y = v[:, -1]  # (MN,)
-    
-    # 2. 向量化构建字典矩阵 A (使用与MUSIC相同的网格)
-    R_grid_mesh, Theta_grid_mesh = np.meshgrid(r_grid, theta_grid, indexing='ij')
-    R_flat = R_grid_mesh.flatten()
-    Theta_flat = Theta_grid_mesh.flatten()
-    
-    m_idx = np.arange(M).reshape(-1, 1)
-    n_idx = np.arange(N).reshape(-1, 1)
-    Theta_rad = np.deg2rad(Theta_flat)
-    
-    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c + 
-              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
-    a_tx = np.exp(1j * phi_tx)
-    
-    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
-    a_rx = np.exp(1j * phi_rx)
-    
-    # 构建字典 A: (MN, N_grid)
-    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
-    
-    # 归一化字典原子 (OMP 关键步骤)
-    A = A / np.sqrt(M*N)
-    
-    # 3. 匹配: correlations = |A^H * y|
-    correlations = np.abs(A.conj().T @ y)
-    
-    # 4. 找到最佳匹配原子 (粗搜索)
-    idx = np.argmax(correlations)
-    best_r = R_flat[idx]
-    best_theta = Theta_flat[idx]
-    
-    if not refine:
-        return best_r, best_theta
-    
-    # 5. 细搜索 (与 MUSIC 相同策略，确保公平)
-    r_step = (r_grid[-1] - r_grid[0]) / (len(r_grid) - 1) if len(r_grid) > 1 else 50
-    theta_step = (theta_grid[-1] - theta_grid[0]) / (len(theta_grid) - 1) if len(theta_grid) > 1 else 2
-    
-    r_fine = np.linspace(max(0, best_r - r_step/2), 
-                         min(cfg.r_max, best_r + r_step/2), 21)
-    theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step/2), 
-                             min(cfg.theta_max, best_theta + theta_step/2), 21)
-    
-    max_corr = -1
-    refined_r, refined_theta = best_r, best_theta
-    norm_factor = np.sqrt(M * N)
-    
-    for r in r_fine:
-        for t in theta_fine:
-            a = get_steering_vector(r, t)
-            corr = np.abs(a.conj().T @ y) / norm_factor
-            if corr > max_corr:
-                max_corr = corr
-                refined_r, refined_theta = r, t
-    
-    return refined_r, refined_theta
-
-
-# ==========================================
 # 辅助函数
 # ==========================================
 def find_best_model_path(L_snapshots=None, model_type=None, use_random_model=False):
@@ -578,7 +494,7 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     if fast_mode:
         methods = ["CVNN", "Real-CNN"]
     else:
-        methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
+        methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT"]
     
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
@@ -603,8 +519,7 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
     
     print(f"\n📐 物理分辨率: Range={res_r:.2f}m, Angle={res_theta:.2f}°")
-    print(f"📐 动态生成网格: {len(r_grid)}×{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点 (基于分辨率/2)")
-    print(f"📐 所有网格搜索方法 (MUSIC/OMP) 使用相同网格，确保公平对比")
+    print(f"📐 MUSIC网格: {len(r_grid)}×{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点 (基于分辨率/2)")
     if music_continuous:
         print(f"🔬 MUSIC 使用连续优化 (消除栅栏效应，逼近 CRB)")
 
@@ -666,14 +581,6 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
             errors["ESPRIT"]["theta"].append((th_est_esprit-theta_true)**2)
             errors["ESPRIT"]["time"].append(time.time()-t0)
             sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
-
-            # OMP (与MUSIC使用相同网格，确保公平对比)
-            t0 = time.time()
-            r_est_omp, th_est_omp = omp_2d_refined(R_complex, r_grid, theta_grid, refine=True)
-            errors["OMP"]["r"].append((r_est_omp-r_true)**2)
-            errors["OMP"]["theta"].append((th_est_omp-theta_true)**2)
-            errors["OMP"]["time"].append(time.time()-t0)
-            sample_data["OMP"] = (r_est_omp, th_est_omp)
             
             sample_results.append(sample_data)
 
@@ -698,8 +605,8 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
         
         # 输出前5个样本的详细估计结果
         print(f"\n📋 前5个样本的估计结果示例:")
-        print(f"{'#':<4} {'真实值':<20} {'CVNN':<20} {'Real-CNN':<20} {'MUSIC':<20} {'ESPRIT':<20} {'OMP':<20}")
-        print("-" * 130)
+        print(f"{'#':<4} {'真实值':<20} {'CVNN':<20} {'Real-CNN':<20} {'MUSIC':<20} {'ESPRIT':<20}")
+        print("-" * 110)
         for i in range(min(5, len(sample_results))):
             s = sample_results[i]
             true_str = f"({s['r_true']:.1f}m, {s['theta_true']:.1f}°)"
@@ -707,8 +614,7 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
             rcnn_str = f"({s['Real-CNN'][0]:.1f}m, {s['Real-CNN'][1]:.1f}°)"
             music_str = f"({s['MUSIC'][0]:.1f}m, {s['MUSIC'][1]:.1f}°)"
             esprit_str = f"({s['ESPRIT'][0]:.1f}m, {s['ESPRIT'][1]:.1f}°)"
-            omp_str = f"({s['OMP'][0]:.1f}m, {s['OMP'][1]:.1f}°)"
-            print(f"{i+1:<4} {true_str:<20} {cvnn_str:<20} {rcnn_str:<20} {music_str:<20} {esprit_str:<20} {omp_str:<20}")
+            print(f"{i+1:<4} {true_str:<20} {cvnn_str:<20} {rcnn_str:<20} {music_str:<20} {esprit_str:<20}")
 
     return snr_list, results, L
 
@@ -722,8 +628,8 @@ def plot_results(snr_list, results, L_snapshots=None):
     except: pass
 
     methods = [m for m in results.keys() if m != "CRB"]
-    colors = {'CVNN': '#1f77b4', 'Real-CNN': '#2ca02c', 'MUSIC': '#d62728', 'ESPRIT': '#ff7f0e', 'OMP': '#9467bd'}
-    markers = {'CVNN': 'o', 'Real-CNN': '^', 'MUSIC': 's', 'ESPRIT': 'd', 'OMP': 'v'}
+    colors = {'CVNN': '#1f77b4', 'Real-CNN': '#2ca02c', 'MUSIC': '#d62728', 'ESPRIT': '#ff7f0e'}
+    markers = {'CVNN': 'o', 'Real-CNN': '^', 'MUSIC': 's', 'ESPRIT': 'd'}
 
     fig = plt.figure(figsize=(20, 12))
 
@@ -804,7 +710,7 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*70}\n📊 快拍数对比实验 (SNR={snr_db}dB)\n{'='*70}")
     
-    methods = ["MUSIC", "ESPRIT", "OMP", "CVNN", "CRB"]
+    methods = ["MUSIC", "ESPRIT", "CVNN", "CRB"]
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     
     # 基于物理分辨率动态生成网格 (与 run_benchmark 保持一致)
@@ -851,11 +757,6 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
             t0 = time.time(); r_est, _ = esprit_2d_robust(R_complex, cfg.M, cfg.N)
             errors["ESPRIT"]["r"].append((r_est - r_true)**2)
             errors["ESPRIT"]["time"].append(time.time()-t0)
-            
-            # OMP (与MUSIC使用相同网格)
-            t0 = time.time(); r_est, _ = omp_2d_refined(R_complex, r_grid, theta_grid, refine=True)
-            errors["OMP"]["r"].append((r_est - r_true)**2)
-            errors["OMP"]["time"].append(time.time()-t0)
 
         for m in methods:
             if m != "CRB":
@@ -865,7 +766,7 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
         crb_r, _ = compute_crb_average(snr_db, L=L, num_samples=200)
         results["CRB"]["rmse_r"].append(crb_r)
         
-        print(f"L={L:<3} | CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m | OMP: {results['OMP']['rmse_r'][-1]:.2f}m")
+        print(f"L={L:<3} | CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m | MUSIC: {results['MUSIC']['rmse_r'][-1]:.2f}m")
 
     plt.figure(figsize=(10, 6))
     for m in methods:
