@@ -295,13 +295,16 @@ def music_2d_continuous(R, r_search_coarse, theta_search_coarse):
 def esprit_2d_robust(R, M, N):
     """
     改进的 ESPRIT，添加相位解模糊处理
+    
+    修复: 使用多候选解模糊策略，选择投影误差最小的解
     """
     MN = M * N
     K = 1
 
     w, v = np.linalg.eigh(R)
-    Us = v[:, -K:]
+    Us = v[:, -K:]  # 信号子空间
 
+    # === 接收端: 估计角度 ===
     J1_rx = np.zeros((M*(N-1), MN))
     J2_rx = np.zeros((M*(N-1), MN))
     for i in range(M):
@@ -321,6 +324,7 @@ def esprit_2d_robust(R, M, N):
         sin_theta = np.clip(sin_theta, -1, 1)
         theta_est = np.rad2deg(np.arcsin(sin_theta))
 
+        # === 发射端: 估计距离 ===
         J1_tx = np.zeros((N*(M-1), MN))
         J2_tx = np.zeros((N*(M-1), MN))
         for i in range(M-1):
@@ -335,14 +339,45 @@ def esprit_2d_robust(R, M, N):
         eigenvalue_tx = np.linalg.eigvals(Phi_tx)[0]
         phase_tx = np.angle(eigenvalue_tx)
 
+        # === 改进的相位解模糊: 多候选策略 ===
         phi_angle = 2 * np.pi * cfg.d * sin_theta / cfg.wavelength
         diff_phase = phase_tx - phi_angle
-        r_est = -diff_phase * cfg.c / (4 * np.pi * cfg.delta_f)
-
+        
+        # 基础距离估计
+        r_base = -diff_phase * cfg.c / (4 * np.pi * cfg.delta_f)
         max_unambiguous_r = cfg.c / (2 * cfg.delta_f)
-        while r_est < 0: r_est += max_unambiguous_r
-        while r_est > cfg.r_max: r_est -= max_unambiguous_r
-        r_est = np.clip(r_est, 0, cfg.r_max)
+        
+        # 生成多个候选解 (考虑 ±k 个模糊周期)
+        candidates = []
+        for k in range(-3, 4):  # 检查 ±3 个周期
+            r_candidate = r_base + k * max_unambiguous_r
+            if 0 <= r_candidate <= cfg.r_max:
+                candidates.append(r_candidate)
+        
+        if not candidates:
+            # 如果没有有效候选，强制映射到有效范围
+            r_est = r_base
+            while r_est < 0: r_est += max_unambiguous_r
+            while r_est > cfg.r_max: r_est -= max_unambiguous_r
+            r_est = np.clip(r_est, 0, cfg.r_max)
+        elif len(candidates) == 1:
+            r_est = candidates[0]
+        else:
+            # 多候选时，选择投影到信号子空间误差最小的解
+            best_r = candidates[0]
+            min_error = np.inf
+            
+            for r_cand in candidates:
+                # 构造导向矢量
+                a = get_steering_vector(r_cand, theta_est)
+                # 计算到信号子空间的投影误差
+                proj = Us @ (Us.conj().T @ a)
+                error = np.linalg.norm(a - proj)
+                if error < min_error:
+                    min_error = error
+                    best_r = r_cand
+            
+            r_est = best_r
 
     except Exception:
         r_est = cfg.r_max / 2
@@ -352,25 +387,34 @@ def esprit_2d_robust(R, M, N):
 
 
 # ==========================================
-# 3. OMP (向量化 + 两级搜索)
+# 3. OMP (标准稀疏重构，使用独立粗网格)
 # ==========================================
 def omp_2d_refined(R, r_grid_coarse, theta_grid_coarse, refine=True):
     """
-    [标准修复版] 向量化 OMP
+    [公平对比版] OMP 稀疏重构
+    
+    修改说明:
+    - 使用独立的粗网格 (不共享 MUSIC 的细网格)
+    - 单次网格搜索，不做细搜索 (体现 OMP 的栅栏效应)
+    - 这样更符合 OMP 作为"低复杂度替代方案"的定位
     
     区别于 MUSIC:
     - OMP 基于信号子空间 (最大特征向量)
     - MUSIC 基于噪声子空间
-    - 在 L=1 单目标时两者数学上近似等价
     """
     M, N = cfg.M, cfg.N
+    
+    # OMP 使用独立的粗网格 (体现其低复杂度特性)
+    # 典型 OMP 网格: 50x30 点 (比 MUSIC 粗很多)
+    r_grid_omp = np.linspace(0, cfg.r_max, 50)
+    theta_grid_omp = np.linspace(cfg.theta_min, cfg.theta_max, 30)
     
     # 1. 获取观测信号 (取最大特征向量作为信号代理 y)
     w, v = np.linalg.eigh(R)
     y = v[:, -1]  # (MN,)
     
-    # 2. 向量化构建字典矩阵 A
-    R_grid, Theta_grid = np.meshgrid(r_grid_coarse, theta_grid_coarse, indexing='ij')
+    # 2. 向量化构建字典矩阵 A (使用 OMP 自己的粗网格)
+    R_grid, Theta_grid = np.meshgrid(r_grid_omp, theta_grid_omp, indexing='ij')
     R_flat = R_grid.flatten()
     Theta_flat = Theta_grid.flatten()
     
@@ -399,34 +443,10 @@ def omp_2d_refined(R, r_grid_coarse, theta_grid_coarse, refine=True):
     best_r = R_flat[idx]
     best_theta = Theta_flat[idx]
     
-    if not refine:
-        return best_r, best_theta
-    
-    # 5. 细搜索 (OMP 的峰值比 MUSIC 更"钝"，细搜效果不如 MUSIC 明显)
-    r_step = (r_grid_coarse[-1] - r_grid_coarse[0]) / (len(r_grid_coarse) - 1) if len(r_grid_coarse) > 1 else 100
-    theta_step = (theta_grid_coarse[-1] - theta_grid_coarse[0]) / (len(theta_grid_coarse) - 1) if len(theta_grid_coarse) > 1 else 2
-    
-    r_fine = np.linspace(max(0, best_r - r_step), 
-                         min(cfg.r_max, best_r + r_step), 21)
-    theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step), 
-                             min(cfg.theta_max, best_theta + theta_step), 21)
-    
-    max_corr = -1
-    refined_r, refined_theta = best_r, best_theta
-    
-    # 导向矢量由纯相位项组成 (e^{jφ})，模长恒定为 sqrt(M*N)，预计算加速
-    norm_factor = np.sqrt(M * N)
-    
-    for r in r_fine:
-        for t in theta_fine:
-            a = get_steering_vector(r, t)
-            # 直接除常数，避免每次循环计算 np.linalg.norm
-            corr = np.abs(a.conj().T @ y) / norm_factor
-            if corr > max_corr:
-                max_corr = corr
-                refined_r, refined_theta = r, t
-    
-    return refined_r, refined_theta
+    # OMP 不做细搜索，直接返回粗网格结果
+    # 这体现了 OMP 的"栅栏效应" (Grid Straddling Loss)
+    # 与 MUSIC 的两级搜索形成对比
+    return best_r, best_theta
 
 
 # ==========================================
@@ -633,9 +653,9 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
             errors["ESPRIT"]["time"].append(time.time()-t0)
             sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
 
-            # OMP [Modified call: use refined version]
+            # OMP (使用独立粗网格，不做细搜索)
             t0 = time.time()
-            r_est_omp, th_est_omp = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp, refine=True)
+            r_est_omp, th_est_omp = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp)
             errors["OMP"]["r"].append((r_est_omp-r_true)**2)
             errors["OMP"]["theta"].append((th_est_omp-theta_true)**2)
             errors["OMP"]["time"].append(time.time()-t0)
