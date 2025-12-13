@@ -9,6 +9,7 @@ import torch
 import time
 import os
 from tqdm import tqdm
+import json
 
 # =========================================================
 # 1. 强制依赖本地项目文件
@@ -179,7 +180,14 @@ def load_models(device, L):
 # =========================================================
 # 4. 主流程
 # =========================================================
-def run_benchmark(L_snapshots=None, num_samples=200, fast_mode=False, snr_list=None, device=None):
+def run_benchmark(
+    L_snapshots=None,
+    num_samples=200,
+    fast_mode=False,
+    snr_list=None,
+    device=None,
+    print_points=True,
+):
     # 动态修改全局配置以适配 utils_physics
     if L_snapshots is not None:
         cfg.L_snapshots = L_snapshots
@@ -223,6 +231,14 @@ def run_benchmark(L_snapshots=None, num_samples=200, fast_mode=False, snr_list=N
         methods = ['CVNN', 'Real-CNN', 'MUSIC', 'ESPRIT', 'OMP']
     results = {m: {'r': [], 't': [], 'time': []} for m in methods}
     results['CRB'] = {'r': [], 't': []}
+
+    # 打印表头，便于看每个 SNR 的所有曲线点
+    if print_points:
+        print("\n--- Points used for plotting (per SNR) ---")
+        print("SNR(dB) | "
+              "RMSE_R(m): " + ", ".join([f"{m}" for m in methods]) + " | "
+              "RMSE_θ(deg): " + ", ".join([f"{m}" for m in methods]) + " | "
+              "Time(ms): " + ", ".join([f"{m}" for m in methods]))
 
     for snr in snr_list:
         print(f"Running SNR = {snr} dB ...", end='\r')
@@ -308,10 +324,45 @@ def run_benchmark(L_snapshots=None, num_samples=200, fast_mode=False, snr_list=N
         results['CRB']['r'].append(results['CVNN']['r'][-1] * 0.5)
         results['CRB']['t'].append(results['CVNN']['t'][-1] * 0.5)
 
-        if not fast_mode:
-            print(f"SNR={snr}dB | RMSE_R: CVNN={results['CVNN']['r'][-1]:.2f}m, MUSIC={results['MUSIC']['r'][-1]:.2f}m")
+        if print_points:
+            rmse_r_vals = [results[m]['r'][-1] for m in methods]
+            rmse_t_vals = [results[m]['t'][-1] for m in methods]
+            time_ms_vals = [results[m]['time'][-1] * 1000.0 for m in methods]
+
+            def _fmt(v):
+                if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
+                    return "nan"
+                return f"{v:.2f}"
+
+            s_rmse_r = ", ".join([_fmt(v) for v in rmse_r_vals])
+            s_rmse_t = ", ".join([_fmt(v) for v in rmse_t_vals])
+            s_time = ", ".join([_fmt(v) for v in time_ms_vals])
+            print(f"{snr:>6} | RMSE_R(m): {s_rmse_r} | RMSE_θ(deg): {s_rmse_t} | Time(ms): {s_time}")
         else:
-            print(f"SNR={snr}dB | RMSE_R: CVNN={results['CVNN']['r'][-1]:.2f}m, Real-CNN={results['Real-CNN']['r'][-1]:.2f}m")
+            # 保持一个简短的默认输出
+            if not fast_mode:
+                print(f"SNR={snr}dB | RMSE_R: CVNN={results['CVNN']['r'][-1]:.2f}m, MUSIC={results['MUSIC']['r'][-1]:.2f}m")
+            else:
+                print(f"SNR={snr}dB | RMSE_R: CVNN={results['CVNN']['r'][-1]:.2f}m, Real-CNN={results['Real-CNN']['r'][-1]:.2f}m")
+
+    # 最后再汇总打印一次，方便复制粘贴排查曲线异常
+    if print_points:
+        print("\n--- Plot series (summary) ---")
+        summary = {
+            'device': str(device),
+            'L': int(L_snapshots),
+            'snr_list': list(snr_list),
+            'methods': list(methods),
+            'series': {
+                m: {
+                    'rmse_r': [float(x) for x in results[m]['r']],
+                    'rmse_theta': [float(x) for x in results[m]['t']],
+                    'time_ms': [float(x) * 1000.0 for x in results[m]['time']],
+                }
+                for m in methods
+            },
+        }
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
 
     return snr_list, results, L_snapshots
 
