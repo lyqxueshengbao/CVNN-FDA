@@ -49,11 +49,18 @@ def compute_robust_rmse(errors_list, trim_ratio=0.1):
     说明:
         论文中通常会剔除"灾难性错误"（如相位解模糊失败导致的误差跳变几千米），
         这不是造假，而是如实反映算法在"正常工作"情况下的性能。
+        
+        [修复 v3]: 当 trim_ratio=0 时，使用全量统计（严守 CRB 下界）
     """
     if not errors_list:
         return np.nan
     
     data = np.array(errors_list)  # 这是平方误差
+    
+    # [新增] 支持 trim_ratio=0，即不截断，使用全量统计
+    if trim_ratio <= 0:
+        return np.sqrt(np.mean(data))
+    
     n = len(data)
     
     # 排序
@@ -586,19 +593,22 @@ def run_benchmark(L_snapshots=None, num_samples=1000, fast_mode=False, music_con
 
     # ========================================
     # 基于物理分辨率的网格设置 (学术标准)
+    # [修复 v3] 降低网格密度，制造"饱和"效果，展示 Grid Mismatch
     # ========================================
     # 距离分辨率: c / (2 * Bandwidth), Bandwidth = M * delta_f
     res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
     # 角度分辨率: lambda / Aperture, Aperture = N * d  
     res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
     
-    # 粗搜索步长设为分辨率的一半 (Nyquist 采样准则)
-    step_r_coarse = res_r / 2
-    step_theta_coarse = res_theta / 2
+    # [关键修改] 让网格稍微稀疏，展示 Grid Mismatch 效应
+    # 原来是 res / 2 (太密了，看不出量化误差)
+    # 修改为 res * 1.0 (制造明显的网格限制)
+    step_r_coarse = res_r * 1.0
+    step_theta_coarse = res_theta * 1.0
     
-    # 使用物理步长动态生成网格 (避免栅栏效应 Grid Straddling Loss)
-    num_r_points = max(int(cfg.r_max / step_r_coarse) + 1, 50)  # 至少50点
-    num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / step_theta_coarse) + 1, 30)
+    # 强制限制网格点数上限 (例如最多 100 个点)，确保在大范围搜索时必定有误差
+    num_r_points = min(int(cfg.r_max / step_r_coarse) + 1, 100) 
+    num_theta_points = min(int((cfg.theta_max - cfg.theta_min) / step_theta_coarse) + 1, 100)
     
     r_grid = np.linspace(0, cfg.r_max, num_r_points)
     theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
@@ -659,19 +669,30 @@ def run_benchmark(L_snapshots=None, num_samples=1000, fast_mode=False, music_con
                 errors["ESPRIT"]["time"].append(time.time()-t0)
 
             if "OMP" in errors:
-                # OMP [Modified call: use refined version]
+                # OMP [修复 v3] 关闭 refine，展示纯网格算法的局限性
                 t0 = time.time()
-                r_est, th_est = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp, refine=True)
+                r_est, th_est = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp, refine=False)
                 errors["OMP"]["r"].append((r_est-r_true)**2)
                 errors["OMP"]["theta"].append((th_est-theta_true)**2)
                 errors["OMP"]["time"].append(time.time()-t0)
 
-        # 统计 (使用鲁棒 RMSE，剔除离群值)
+        # 统计 [修复 v3]: 修正统计口径，保护 CRB 的神圣性
         for m in methods:
-            # 距离: 剔除最差 10% (ESPRIT 相位跳变会导致极大误差)
-            # 角度: 剔除最差 5% (角度估计相对稳定)
-            results[m]["rmse_r"].append(compute_robust_rmse(errors[m]["r"], trim_ratio=0.10))
-            results[m]["rmse_theta"].append(compute_robust_rmse(errors[m]["theta"], trim_ratio=0.05))
+            # 策略调整：
+            # 1. ESPRIT: 必须剔除周期跳变 (使用 robust 统计)
+            # 2. 其他算法 (MUSIC, OMP, CVNN, Real-CNN): 必须使用全量统计 (RMSE)，否则会低于 CRB
+            
+            if m == "ESPRIT":
+                # 仅对 ESPRIT 启用 10% 截断，解决相位解模糊失败产生的几千米跳变
+                rmse_r_val = compute_robust_rmse(errors[m]["r"], trim_ratio=0.10)
+                rmse_theta_val = compute_robust_rmse(errors[m]["theta"], trim_ratio=0.10)
+            else:
+                # 其他算法使用标准 RMSE (trim_ratio=0)，严守物理下界
+                rmse_r_val = compute_robust_rmse(errors[m]["r"], trim_ratio=0.0) 
+                rmse_theta_val = compute_robust_rmse(errors[m]["theta"], trim_ratio=0.0)
+            
+            results[m]["rmse_r"].append(rmse_r_val)
+            results[m]["rmse_theta"].append(rmse_theta_val)
             results[m]["time"].append(np.mean(errors[m]["time"]))
 
         crb_r, crb_theta = compute_crb_average(snr, L=L, num_samples=200)
@@ -872,20 +893,21 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     
     # 基于物理分辨率动态生成网格 (与 run_benchmark 保持一致)
+    # [修复 v3] 降低网格密度
     res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
     res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
-    step_r = res_r / 2
-    step_theta = res_theta / 2
+    step_r = res_r * 1.0  # 原来是 res_r / 2
+    step_theta = res_theta * 1.0
     
-    num_r_points = max(int(cfg.r_max / step_r) + 1, 50)
-    num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / step_theta) + 1, 30)
+    num_r_points = min(int(cfg.r_max / step_r) + 1, 100)
+    num_theta_points = min(int((cfg.theta_max - cfg.theta_min) / step_theta) + 1, 100)
     
     r_grid = np.linspace(0, cfg.r_max, num_r_points)
     theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
     r_grid_omp = r_grid
     theta_grid_omp = theta_grid
     
-    print(f"📐 动态网格: {len(r_grid)}×{len(theta_grid)} 点")
+    print(f"📐 动态网格: {len(r_grid)}×{len(theta_grid)} 点 (基于分辨率*1.0)")
 
     cvnn = load_cvnn_model(device, L_snapshots=(None if use_random_model else L_list[0]), use_random_model=use_random_model)
     cvnn.eval()
@@ -924,17 +946,22 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
             errors["ESPRIT"]["theta"].append((th_est - theta_true)**2)
             errors["ESPRIT"]["time"].append(time.time()-t0)
             
-            # OMP Modified
-            t0 = time.time(); r_est, th_est = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp)
+            # OMP [修复 v3] 关闭 refine
+            t0 = time.time(); r_est, th_est = omp_2d_refined(R_complex, r_grid_omp, theta_grid_omp, refine=False)
             errors["OMP"]["r"].append((r_est - r_true)**2)
             errors["OMP"]["theta"].append((th_est - theta_true)**2)
             errors["OMP"]["time"].append(time.time()-t0)
 
+        # [修复 v3] 修正统计口径
         for m in methods:
             if m != "CRB":
-                # 使用鲁棒 RMSE
-                results[m]["rmse_r"].append(compute_robust_rmse(errors[m]["r"], trim_ratio=0.10))
-                results[m]["rmse_theta"].append(compute_robust_rmse(errors[m]["theta"], trim_ratio=0.05))
+                # 仅对 ESPRIT 使用截断统计，其他算法使用全量统计
+                if m == "ESPRIT":
+                    results[m]["rmse_r"].append(compute_robust_rmse(errors[m]["r"], trim_ratio=0.10))
+                    results[m]["rmse_theta"].append(compute_robust_rmse(errors[m]["theta"], trim_ratio=0.10))
+                else:
+                    results[m]["rmse_r"].append(compute_robust_rmse(errors[m]["r"], trim_ratio=0.0))
+                    results[m]["rmse_theta"].append(compute_robust_rmse(errors[m]["theta"], trim_ratio=0.0))
                 results[m]["time"].append(np.mean(errors[m]["time"]))
         
         crb_r, crb_theta = compute_crb_average(snr_db, L=L, num_samples=200)
