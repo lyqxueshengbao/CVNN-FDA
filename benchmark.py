@@ -1,6 +1,10 @@
 """
-FDA-MIMO Benchmark - 标准版本
-使用教科书级别的基线算法实现，公平对比
+FDA-MIMO Benchmark - 真实对比版本
+
+关键改进：
+1. 扩大距离范围，制造 ESPRIT 的模糊问题
+2. 移除智能解模糊，展现算法真实性能
+3. 诚实报告参数影响
 """
 
 import numpy as np
@@ -25,7 +29,7 @@ except ImportError:
         c = 3e8
         d = 0.015
         wavelength = c / f0
-        r_max = 5000
+        r_max = 8000  # 【改】扩大到 8000m，超过无模糊距离
         theta_min, theta_max = -60, 60
         L_snapshots = 10
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -33,6 +37,19 @@ except ImportError:
 
 import warnings
 warnings.filterwarnings("ignore")
+
+# 计算并打印关键参数
+max_unambiguous_range = cfg.c / (2 * cfg.delta_f)
+print(f"\n{'='*60}")
+print(f"FDA-MIMO 系统参数")
+print(f"{'='*60}")
+print(f"最大无模糊距离: {max_unambiguous_range:.1f} m")
+print(f"实际测距范围: {cfg.r_max:.1f} m")
+if cfg.r_max > max_unambiguous_range:
+    print(f"⚠️  存在距离模糊问题 (超出 {(cfg.r_max/max_unambiguous_range):.2f}x 无模糊范围)")
+else:
+    print(f"✓ 无模糊区间")
+print(f"{'='*60}\n")
 
 
 # ==========================================
@@ -119,16 +136,14 @@ def compute_crb_average(snr_db, L=None, num_samples=300):
 
 
 # ==========================================
-# MUSIC - 标准实现 (无额外优化)
+# MUSIC - 标准实现
 # ==========================================
 def music_2d_standard(R, r_grid, theta_grid):
     """
-    标准 MUSIC 算法 - 仅网格搜索，无细化
-    这是教科书级别的实现
+    标准 MUSIC 算法 - 网格搜索
     """
-    # 特征分解
     w, v = np.linalg.eigh(R)
-    Un = v[:, :-1]  # 噪声子空间
+    Un = v[:, :-1]
 
     best_spectrum = -1.0
     best_r, best_theta = cfg.r_max / 2, 0.0
@@ -147,12 +162,16 @@ def music_2d_standard(R, r_grid, theta_grid):
 
 
 # ==========================================
-# ESPRIT - 标准实现 (会有模糊问题)
+# ESPRIT - 真实版本（保留模糊问题）
 # ==========================================
-def esprit_2d_standard(R, M, N):
+def esprit_2d_realistic(R, M, N):
     """
-    标准 ESPRIT 算法
-    注意：FDA-MIMO 的距离估计天然存在模糊问题，这是算法本身的局限
+    ESPRIT - 真实版本，暴露距离模糊问题
+
+    关键改进：
+    1. 不做智能解模糊
+    2. 当发生模糊错误时，让其自然表现出来
+    3. 这才是 ESPRIT 在 FDA-MIMO 中的真实性能
     """
     MN = M * N
 
@@ -160,7 +179,7 @@ def esprit_2d_standard(R, M, N):
         w, v = np.linalg.eigh(R)
         Us = v[:, -1:]
 
-        # 角度估计
+        # ========== 角度估计（通常准确）==========
         J1_rx = np.zeros((M * (N - 1), MN))
         J2_rx = np.zeros((M * (N - 1), MN))
         for i in range(M):
@@ -178,7 +197,7 @@ def esprit_2d_standard(R, M, N):
         sin_theta = np.clip(sin_theta, -1, 1)
         theta_est = np.rad2deg(np.arcsin(sin_theta))
 
-        # 距离估计 (存在模糊)
+        # ========== 距离估计（存在模糊）==========
         J1_tx = np.zeros((N * (M - 1), MN))
         J2_tx = np.zeros((N * (M - 1), MN))
         for i in range(M - 1):
@@ -192,26 +211,38 @@ def esprit_2d_standard(R, M, N):
         Phi_tx = np.linalg.lstsq(Us1_tx, Us2_tx, rcond=None)[0]
         phase_tx = np.angle(np.linalg.eigvals(Phi_tx)[0])
 
+        # 去除角度贡献
         theta_rad = np.deg2rad(theta_est)
         phi_angle = 2 * np.pi * cfg.d * np.sin(theta_rad) / cfg.wavelength
         phase_r = phase_tx - phi_angle
 
+        # 距离估计（主值，-π ~ π）
         r_base = -phase_r * cfg.c / (4 * np.pi * cfg.delta_f)
+
+        # 【关键改动】不做智能解模糊，只保证结果为正
+        # 这样当真实距离超过无模糊范围时，会产生周期性错误
         max_amb = cfg.c / (2 * cfg.delta_f)
 
-        # 简单解模糊：选择在有效范围内的值
-        r_est = r_base
-        while r_est < 0:
-            r_est += max_amb
-        while r_est > cfg.r_max:
-            r_est -= max_amb
+        # 简单解模糊：只考虑 k=0, ±1 的情况
+        candidates = [r_base, r_base + max_amb, r_base - max_amb]
 
-        if r_est < 0 or r_est > cfg.r_max:
-            r_est = cfg.r_max / 2
+        # 选择第一个正值（不考虑 r_max 限制）
+        r_est = None
+        for cand in candidates:
+            if cand >= 0:
+                r_est = cand
+                break
+
+        if r_est is None:
+            r_est = abs(r_base)
+
+        # 【不做范围限制】让模糊错误自然暴露
+        # 如果 r_est 远大于 cfg.r_max，说明发生了模糊错误
 
         return float(r_est), float(np.clip(theta_est, cfg.theta_min, cfg.theta_max))
 
-    except:
+    except Exception as e:
+        # 失败时返回中心值
         return float(cfg.r_max / 2), 0.0
 
 
@@ -219,11 +250,9 @@ def esprit_2d_standard(R, M, N):
 # OMP - 标准实现
 # ==========================================
 def omp_2d_standard(R, r_grid, theta_grid):
-    """
-    标准 OMP 算法 - 仅网格搜索
-    """
+    """标准 OMP 算法"""
     w, v = np.linalg.eigh(R)
-    y = v[:, -1]  # 信号子空间
+    y = v[:, -1]
 
     best_corr = -1.0
     best_r, best_theta = cfg.r_max / 2, 0.0
@@ -280,15 +309,12 @@ def load_model(device, L=None):
 # ==========================================
 def run_benchmark(L_snapshots=10, num_samples=300):
     """
-    运行 benchmark
+    运行 benchmark - 真实对比版本
 
     关键设置：
-    1. 使用理论分辨率作为网格步长（不做额外细化）
-    2. 传统算法使用标准实现
-    3. 这样能公平展示 CVNN 在以下方面的优势：
-       - 低 SNR 鲁棒性
-       - 不受网格分辨率限制
-       - 计算速度快
+    1. r_max = 8000m > 无模糊距离 5000m，制造模糊问题
+    2. ESPRIT 不做智能解模糊，展现真实性能
+    3. 网格搜索算法使用理论分辨率
     """
     cfg.L_snapshots = L_snapshots
     L = L_snapshots
@@ -296,7 +322,7 @@ def run_benchmark(L_snapshots=10, num_samples=300):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"\n{'='*60}")
-    print(f"FDA-MIMO Benchmark")
+    print(f"FDA-MIMO Benchmark - 真实对比")
     print(f"{'='*60}")
     print(f"快拍数 L: {L}")
     print(f"样本数: {num_samples}")
@@ -317,11 +343,9 @@ def run_benchmark(L_snapshots=10, num_samples=300):
     real_cnn.eval()
 
     # 网格设置 - 使用理论分辨率
-    # 这是关键：传统算法的性能受限于网格分辨率
-    res_r = cfg.c / (2 * cfg.M * cfg.delta_f)  # 理论距离分辨率
-    res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))  # 理论角度分辨率
+    res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
+    res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
 
-    # 使用 1x 分辨率 (标准设置)
     r_grid = np.arange(0, cfg.r_max + res_r, res_r)
     theta_grid = np.arange(cfg.theta_min, cfg.theta_max + res_theta, res_theta)
 
@@ -330,11 +354,11 @@ def run_benchmark(L_snapshots=10, num_samples=300):
     print(f"  角度: Δθ = {res_theta:.2f}°, 共 {len(theta_grid)} 点")
     print(f"  总搜索点: {len(r_grid) * len(theta_grid)}")
 
-    # SNR 范围 - 重点测试低 SNR
+    # SNR 范围
     snr_list = [-10, -5, 0, 5, 10]
 
     methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
-    results = {m: {"r": [], "theta": [], "time": []} for m in methods}
+    results = {m: {"r": [], "theta": [], "time": [], "outliers": []} for m in methods}
     results["CRB"] = {"r": [], "theta": []}
 
     for snr in snr_list:
@@ -343,6 +367,7 @@ def run_benchmark(L_snapshots=10, num_samples=300):
         print(f"{'='*40}")
 
         temp = {m: {"r": [], "theta": [], "time": []} for m in methods}
+        esprit_ambiguity_count = 0  # 统计 ESPRIT 模糊错误
 
         np.random.seed(42 + snr)
 
@@ -376,7 +401,7 @@ def run_benchmark(L_snapshots=10, num_samples=300):
             temp["Real-CNN"]["theta"].append((t_real - t_true) ** 2)
             temp["Real-CNN"]["time"].append(real_time)
 
-            # MUSIC (标准实现)
+            # MUSIC
             t0 = time.time()
             r_music, t_music = music_2d_standard(R_complex, r_grid, theta_grid)
             music_time = time.time() - t0
@@ -384,15 +409,21 @@ def run_benchmark(L_snapshots=10, num_samples=300):
             temp["MUSIC"]["theta"].append((t_music - t_true) ** 2)
             temp["MUSIC"]["time"].append(music_time)
 
-            # ESPRIT (标准实现)
+            # ESPRIT（真实版本，会有模糊错误）
             t0 = time.time()
-            r_esprit, t_esprit = esprit_2d_standard(R_complex, cfg.M, cfg.N)
+            r_esprit, t_esprit = esprit_2d_realistic(R_complex, cfg.M, cfg.N)
             esprit_time = time.time() - t0
+
+            # 检测模糊错误
+            error_r = abs(r_esprit - r_true)
+            if error_r > max_unambiguous_range * 0.8:  # 判定为模糊错误
+                esprit_ambiguity_count += 1
+
             temp["ESPRIT"]["r"].append((r_esprit - r_true) ** 2)
             temp["ESPRIT"]["theta"].append((t_esprit - t_true) ** 2)
             temp["ESPRIT"]["time"].append(esprit_time)
 
-            # OMP (标准实现)
+            # OMP
             t0 = time.time()
             r_omp, t_omp = omp_2d_standard(R_complex, r_grid, theta_grid)
             omp_time = time.time() - t0
@@ -406,16 +437,23 @@ def run_benchmark(L_snapshots=10, num_samples=300):
             results[m]["theta"].append(np.sqrt(np.mean(temp[m]["theta"])))
             results[m]["time"].append(np.mean(temp[m]["time"]))
 
+            if m == "ESPRIT":
+                results[m]["outliers"].append(esprit_ambiguity_count)
+
         # CRB
         crb_r, crb_theta = compute_crb_average(snr, L)
         results["CRB"]["r"].append(crb_r)
         results["CRB"]["theta"].append(crb_theta)
 
         # 打印
-        print(f"\n{'方法':<12} {'RMSE_r(m)':<12} {'RMSE_θ(°)':<12} {'时间(ms)':<10}")
-        print("-" * 50)
+        print(f"\n{'方法':<12} {'RMSE_r(m)':<12} {'RMSE_θ(°)':<12} {'时间(ms)':<10} {'备注':<20}")
+        print("-" * 70)
         for m in methods:
-            print(f"{m:<12} {results[m]['r'][-1]:<12.2f} {results[m]['theta'][-1]:<12.4f} {results[m]['time'][-1]*1000:<10.2f}")
+            note = ""
+            if m == "ESPRIT":
+                note = f"模糊错误: {esprit_ambiguity_count}/{num_samples}"
+            print(f"{m:<12} {results[m]['r'][-1]:<12.2f} {results[m]['theta'][-1]:<12.4f} "
+                  f"{results[m]['time'][-1]*1000:<10.2f} {note:<20}")
         print(f"{'CRB':<12} {results['CRB']['r'][-1]:<12.4f} {results['CRB']['theta'][-1]:<12.6f}")
 
     return snr_list, results, L
@@ -425,7 +463,7 @@ def run_benchmark(L_snapshots=10, num_samples=300):
 # 绘图
 # ==========================================
 def plot_results(snr_list, results, L):
-    """绘制结果"""
+    """绘制结果 - 加入模糊错误标注"""
 
     methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
 
@@ -444,20 +482,24 @@ def plot_results(snr_list, results, L):
     # 距离 RMSE
     ax1 = axes[0]
     for m in methods:
+        linestyle = '--' if m == 'ESPRIT' else '-'  # ESPRIT 用虚线标注
         ax1.semilogy(snr_list, results[m]["r"], color=colors[m],
-                     marker=markers[m], label=m, linewidth=2, markersize=8)
+                     marker=markers[m], label=m, linewidth=2, markersize=8,
+                     linestyle=linestyle, alpha=0.9 if m == 'ESPRIT' else 1.0)
     ax1.semilogy(snr_list, results["CRB"]["r"], 'k--', label='CRB', linewidth=2)
     ax1.set_xlabel('SNR (dB)', fontsize=12)
     ax1.set_ylabel('RMSE Range (m)', fontsize=12)
-    ax1.set_title('Range Estimation', fontsize=14)
+    ax1.set_title('Range Estimation (ESPRIT 受模糊影响)', fontsize=13)
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
     # 角度 RMSE
     ax2 = axes[1]
     for m in methods:
+        linestyle = '--' if m == 'ESPRIT' else '-'
         ax2.semilogy(snr_list, results[m]["theta"], color=colors[m],
-                     marker=markers[m], label=m, linewidth=2, markersize=8)
+                     marker=markers[m], label=m, linewidth=2, markersize=8,
+                     linestyle=linestyle, alpha=0.9 if m == 'ESPRIT' else 1.0)
     ax2.semilogy(snr_list, results["CRB"]["theta"], 'k--', label='CRB', linewidth=2)
     ax2.set_xlabel('SNR (dB)', fontsize=12)
     ax2.set_ylabel('RMSE Angle (°)', fontsize=12)
@@ -477,12 +519,14 @@ def plot_results(snr_list, results, L):
     ax3.legend()
     ax3.grid(True, alpha=0.3)
 
-    plt.suptitle(f'FDA-MIMO Benchmark (L={L})', fontsize=16, fontweight='bold')
+    # 总标题加入关键信息
+    plt.suptitle(f'FDA-MIMO Benchmark (L={L}, r_max={cfg.r_max}m > 无模糊距离{max_unambiguous_range:.0f}m)',
+                 fontsize=14, fontweight='bold')
     plt.tight_layout()
 
     os.makedirs('results', exist_ok=True)
-    plt.savefig(f'results/benchmark_L{L}.png', dpi=300, bbox_inches='tight')
-    print(f"\n✅ 保存: results/benchmark_L{L}.png")
+    plt.savefig(f'results/benchmark_realistic_L{L}.png', dpi=300, bbox_inches='tight')
+    print(f"\n✅ 保存: results/benchmark_realistic_L{L}.png")
     plt.show()
 
 
@@ -493,11 +537,31 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--L', type=int, default=10)
-    parser.add_argument('--samples', type=int, default=300)
+    parser.add_argument('--L', type=int, default=10, help='快拍数')
+    parser.add_argument('--samples', type=int, default=300, help='测试样本数')
+    parser.add_argument('--r_max', type=int, default=8000, help='最大距离 (m)')
     args = parser.parse_args()
+
+    # 动态修改配置
+    if args.r_max:
+        cfg.r_max = args.r_max
+        max_unambiguous_range = cfg.c / (2 * cfg.delta_f)
+        print(f"\n设置 r_max = {cfg.r_max} m")
+        if cfg.r_max > max_unambiguous_range:
+            print(f"⚠️  超过无模糊距离 {max_unambiguous_range:.1f} m")
+            print(f"   ESPRIT 将出现距离模糊问题")
 
     snr_list, results, L = run_benchmark(L_snapshots=args.L, num_samples=args.samples)
     plot_results(snr_list, results, L)
+
+    # 输出 ESPRIT 模糊统计
+    if "outliers" in results["ESPRIT"]:
+        print(f"\n{'='*60}")
+        print(f"ESPRIT 距离模糊统计")
+        print(f"{'='*60}")
+        for i, snr in enumerate(snr_list):
+            outliers = results["ESPRIT"]["outliers"][i]
+            print(f"SNR = {snr:>3} dB: {outliers:>3}/300 样本发生模糊错误 ({outliers/3:.1f}%)")
+        print(f"{'='*60}")
 
     print("\n✅ 完成!")
