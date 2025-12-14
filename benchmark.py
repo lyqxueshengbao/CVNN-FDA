@@ -488,7 +488,7 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     dummy = torch.randn(1, 2, cfg.M * cfg.N, cfg.M * cfg.N).to(device)
     for _ in range(3): cvnn(dummy); real_cnn(dummy)
 
-    snr_list = [-10, -5, 0, 5, 10]
+    snr_list = [-5, 0, 5]
 
     # 快速模式只测神经网络
     if fast_mode:

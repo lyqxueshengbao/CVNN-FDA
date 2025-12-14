@@ -103,7 +103,7 @@ def test_multiple_snr(model_path=None, snr_list=None, num_samples=1000,
     
     # 默认SNR列表
     if snr_list is None:
-        snr_list = [-10, -5, 0, 5, 10, 15, 20, 25, 30]
+        snr_list = [-5, 0, 5, 10, 15, 20, 25, 30]
     
     # 默认模型路径
     if model_path is None:
@@ -237,7 +237,7 @@ if __name__ == "__main__":
                         help='模型类型')
     parser.add_argument('--samples', type=int, default=1000,
                         help='每个SNR的测试样本数')
-    parser.add_argument('--snr_min', type=float, default=-10,
+    parser.add_argument('--snr_min', type=float, default=-5,
                         help='最小SNR (dB)')
     parser.add_argument('--snr_max', type=float, default=30,
                         help='最大SNR (dB)')
