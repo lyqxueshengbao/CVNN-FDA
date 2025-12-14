@@ -828,6 +828,281 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     return L_list, results
 
 
+# ==========================================
+# 8. MUSIC 精度-速度权衡分析
+# ==========================================
+def run_accuracy_speed_tradeoff(snr_db=20, num_samples=200, L_snapshots=None):
+    """
+    分析不同MUSIC配置的精度-速度权衡
+
+    对比：
+    1. MUSIC (粗网格) - 快速但精度一般
+    2. MUSIC (标准网格) - 平衡
+    3. MUSIC (细网格) - 精度高但较慢
+    4. MUSIC (连续优化) - 最高精度但最慢
+    5. ESPRIT - 快速参数化方法
+    6. CVNN - 深度学习方法
+    7. CRB - 理论下界
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    L = L_snapshots or cfg.L_snapshots
+
+    print("\n" + "="*70)
+    print(f"📊 精度-速度权衡分析 (SNR={snr_db}dB, L={L})")
+    print("="*70)
+
+    # 加载模型
+    cvnn = load_cvnn_model(device, L_snapshots=L)
+    cvnn.eval()
+
+    # 预热
+    dummy = torch.randn(1, 2, cfg.M * cfg.N, cfg.M * cfg.N).to(device)
+    for _ in range(3): cvnn(dummy)
+
+    # 定义不同的MUSIC配置
+    res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
+    res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
+
+    music_configs = {
+        "MUSIC (粗网格)": {
+            "r_points": 30,
+            "theta_points": 20,
+            "refine": False,
+            "continuous": False
+        },
+        "MUSIC (标准网格)": {
+            "r_points": max(int(cfg.r_max / (res_r/2)) + 1, 50),
+            "theta_points": max(int((cfg.theta_max - cfg.theta_min) / (res_theta/2)) + 1, 30),
+            "refine": True,
+            "continuous": False
+        },
+        "MUSIC (细网格)": {
+            "r_points": 150,
+            "theta_points": 100,
+            "refine": True,
+            "continuous": False
+        },
+        "MUSIC (连续优化)": {
+            "r_points": max(int(cfg.r_max / (res_r/2)) + 1, 50),
+            "theta_points": max(int((cfg.theta_max - cfg.theta_min) / (res_theta/2)) + 1, 30),
+            "refine": False,
+            "continuous": True
+        }
+    }
+
+    # 存储结果
+    results = {}
+
+    # 测试每种配置
+    for config_name, config in music_configs.items():
+        print(f"\n测试 {config_name}...")
+        r_grid = np.linspace(0, cfg.r_max, config["r_points"])
+        theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, config["theta_points"])
+
+        errors_r = []
+        errors_theta = []
+        times = []
+
+        for _ in tqdm(range(num_samples), desc=config_name, leave=False):
+            r_true = np.random.uniform(0, cfg.r_max)
+            theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
+            R = generate_covariance_matrix(r_true, theta_true, snr_db)
+            R_complex = R[0] + 1j * R[1]
+
+            t0 = time.time()
+            if config["continuous"]:
+                r_est, theta_est = music_2d_continuous(R_complex, r_grid, theta_grid)
+            else:
+                r_est, theta_est = music_2d_refined(R_complex, r_grid, theta_grid, refine=config["refine"])
+            elapsed = time.time() - t0
+
+            errors_r.append((r_est - r_true)**2)
+            errors_theta.append((theta_est - theta_true)**2)
+            times.append(elapsed)
+
+        results[config_name] = {
+            "rmse_r": np.sqrt(np.mean(errors_r)),
+            "rmse_theta": np.sqrt(np.mean(errors_theta)),
+            "time_ms": np.mean(times) * 1000,
+            "grid_size": config["r_points"] * config["theta_points"]
+        }
+
+    # 测试 ESPRIT
+    print(f"\n测试 ESPRIT...")
+    errors_r = []
+    errors_theta = []
+    times = []
+
+    for _ in tqdm(range(num_samples), desc="ESPRIT", leave=False):
+        r_true = np.random.uniform(0, cfg.r_max)
+        theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
+        R = generate_covariance_matrix(r_true, theta_true, snr_db)
+        R_complex = R[0] + 1j * R[1]
+
+        t0 = time.time()
+        r_est, theta_est = esprit_2d_robust(R_complex, cfg.M, cfg.N)
+        elapsed = time.time() - t0
+
+        errors_r.append((r_est - r_true)**2)
+        errors_theta.append((theta_est - theta_true)**2)
+        times.append(elapsed)
+
+    results["ESPRIT"] = {
+        "rmse_r": np.sqrt(np.mean(errors_r)),
+        "rmse_theta": np.sqrt(np.mean(errors_theta)),
+        "time_ms": np.mean(times) * 1000,
+        "grid_size": 0
+    }
+
+    # 测试 CVNN
+    print(f"\n测试 CVNN...")
+    errors_r = []
+    errors_theta = []
+    times = []
+
+    for _ in tqdm(range(num_samples), desc="CVNN", leave=False):
+        r_true = np.random.uniform(0, cfg.r_max)
+        theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
+        R = generate_covariance_matrix(r_true, theta_true, snr_db)
+        R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device)
+
+        t0 = time.time()
+        with torch.no_grad():
+            pred = cvnn(R_tensor).cpu().numpy()[0]
+        elapsed = time.time() - t0
+
+        r_est = pred[0] * cfg.r_max
+        theta_est = pred[1] * (cfg.theta_max - cfg.theta_min) + cfg.theta_min
+
+        errors_r.append((r_est - r_true)**2)
+        errors_theta.append((theta_est - theta_true)**2)
+        times.append(elapsed)
+
+    results["CVNN"] = {
+        "rmse_r": np.sqrt(np.mean(errors_r)),
+        "rmse_theta": np.sqrt(np.mean(errors_theta)),
+        "time_ms": np.mean(times) * 1000,
+        "grid_size": 0
+    }
+
+    # 计算 CRB
+    print(f"\n计算 CRB...")
+    crb_r, crb_theta = compute_crb_average(snr_db, L=L, num_samples=200)
+    results["CRB"] = {
+        "rmse_r": crb_r,
+        "rmse_theta": crb_theta,
+        "time_ms": 0,
+        "grid_size": 0
+    }
+
+    # 打印结果表格
+    print("\n" + "="*90)
+    print(f"{'方法':<20} {'RMSE_r (m)':<12} {'RMSE_θ (°)':<12} {'时间 (ms)':<12} {'网格大小':<12} {'加速比':<10}")
+    print("-" * 90)
+
+    # 按时间排序
+    sorted_methods = sorted([k for k in results.keys() if k != "CRB"],
+                           key=lambda x: results[x]["time_ms"])
+
+    # 找到最慢的MUSIC作为参考
+    slowest_music_time = max([results[k]["time_ms"] for k in results.keys()
+                              if k.startswith("MUSIC")])
+
+    for method in sorted_methods:
+        r = results[method]
+        speedup = slowest_music_time / r["time_ms"] if r["time_ms"] > 0 else float('inf')
+        grid_str = f"{r['grid_size']}" if r['grid_size'] > 0 else "N/A"
+        print(f"{method:<20} {r['rmse_r']:<12.2f} {r['rmse_theta']:<12.2f} "
+              f"{r['time_ms']:<12.1f} {grid_str:<12} {speedup:<10.1f}x")
+
+    # CRB单独显示
+    r = results["CRB"]
+    print(f"{'CRB':<20} {r['rmse_r']:<12.2f} {r['rmse_theta']:<12.2f} "
+          f"{'N/A':<12} {'N/A':<12} {'N/A':<10}")
+
+    # 生成可视化
+    plot_accuracy_speed_tradeoff(results, snr_db, L)
+
+    return results
+
+
+def plot_accuracy_speed_tradeoff(results, snr_db, L):
+    """绘制精度-速度权衡图"""
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    # 准备数据
+    methods = [k for k in results.keys() if k != "CRB"]
+    times = [results[m]["time_ms"] for m in methods]
+    rmse_r = [results[m]["rmse_r"] for m in methods]
+    rmse_theta = [results[m]["rmse_theta"] for m in methods]
+
+    crb_r = results["CRB"]["rmse_r"]
+    crb_theta = results["CRB"]["rmse_theta"]
+
+    # 颜色和标记
+    colors = []
+    markers = []
+    for m in methods:
+        if "MUSIC" in m:
+            colors.append('#d62728')
+            if "粗" in m: markers.append('v')
+            elif "标准" in m: markers.append('s')
+            elif "细" in m: markers.append('^')
+            elif "连续" in m: markers.append('D')
+            else: markers.append('s')
+        elif m == "ESPRIT":
+            colors.append('#ff7f0e')
+            markers.append('d')
+        elif m == "CVNN":
+            colors.append('#1f77b4')
+            markers.append('o')
+        else:
+            colors.append('gray')
+            markers.append('x')
+
+    # 子图1: 距离精度 vs 时间
+    ax1 = axes[0]
+    for i, m in enumerate(methods):
+        ax1.scatter(times[i], rmse_r[i], c=colors[i], marker=markers[i],
+                   s=150, label=m, alpha=0.8, edgecolors='black', linewidths=1.5)
+
+    ax1.axhline(crb_r, color='black', linestyle='--', linewidth=2, label='CRB', alpha=0.6)
+    ax1.set_xlabel('推理时间 (ms)', fontsize=12)
+    ax1.set_ylabel('RMSE 距离 (m)', fontsize=12)
+    ax1.set_title(f'精度-速度权衡: 距离估计 (SNR={snr_db}dB, L={L})', fontsize=13)
+    ax1.set_xscale('log')
+    ax1.set_yscale('log')
+    ax1.grid(True, which='both', linestyle='--', alpha=0.3)
+    ax1.legend(fontsize=9, loc='best')
+
+    # 标注CVNN的优势区域
+    cvnn_idx = methods.index("CVNN")
+    ax1.annotate('CVNN\n(快速+精确)',
+                xy=(times[cvnn_idx], rmse_r[cvnn_idx]),
+                xytext=(times[cvnn_idx]*3, rmse_r[cvnn_idx]*0.7),
+                fontsize=10, color='#1f77b4', weight='bold',
+                arrowprops=dict(arrowstyle='->', color='#1f77b4', lw=2))
+
+    # 子图2: 角度精度 vs 时间
+    ax2 = axes[1]
+    for i, m in enumerate(methods):
+        ax2.scatter(times[i], rmse_theta[i], c=colors[i], marker=markers[i],
+                   s=150, label=m, alpha=0.8, edgecolors='black', linewidths=1.5)
+
+    ax2.axhline(crb_theta, color='black', linestyle='--', linewidth=2, label='CRB', alpha=0.6)
+    ax2.set_xlabel('推理时间 (ms)', fontsize=12)
+    ax2.set_ylabel('RMSE 角度 (°)', fontsize=12)
+    ax2.set_title(f'精度-速度权衡: 角度估计 (SNR={snr_db}dB, L={L})', fontsize=13)
+    ax2.set_xscale('log')
+    ax2.set_yscale('log')
+    ax2.grid(True, which='both', linestyle='--', alpha=0.3)
+    ax2.legend(fontsize=9, loc='best')
+
+    plt.tight_layout()
+    plt.savefig(f'results/accuracy_speed_tradeoff_SNR{snr_db}dB_L{L}.png', dpi=300, bbox_inches='tight')
+    print(f"\n✅ 精度-速度权衡图已保存: results/accuracy_speed_tradeoff_SNR{snr_db}dB_L{L}.png")
+
+
 if __name__ == "__main__":
     os.makedirs('results', exist_ok=True)
     print("\n" + "="*70 + "\n🎯 FDA-MIMO 雷达参数估计对比实验 (完整修复版 v2)\n" + "="*70)

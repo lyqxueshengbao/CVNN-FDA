@@ -174,6 +174,7 @@ def main():
     parser.add_argument('--use-random-model', action='store_true', help='使用 Lrandom 通用模型')
     parser.add_argument('--num-samples', type=int, default=500, help='评测样本数')
     parser.add_argument('--fast', action='store_true', help='快速模式 (只测NN)')
+    parser.add_argument('--tradeoff', action='store_true', help='运行精度-速度权衡分析')
 
     # 保留此参数以兼容旧脚本，但在代码中会将其拦截
     parser.add_argument('--music-continuous', action='store_true',
@@ -261,6 +262,23 @@ def main():
             L_list=L_list,
             num_samples=args.num_samples,
             use_random_model=args.use_random_model
+        )
+
+    elif args.tradeoff:
+        # 运行精度-速度权衡分析
+        try:
+            from benchmark import run_accuracy_speed_tradeoff
+        except ImportError:
+            try:
+                from FDA_MIMO_Benchmark_Standard import run_accuracy_speed_tradeoff
+            except ImportError:
+                print("❌ 未找到 benchmark 模块。")
+                sys.exit(1)
+
+        run_accuracy_speed_tradeoff(
+            snr_db=args.snr if args.snr != 0 else 20,  # 默认20dB
+            num_samples=args.num_samples,
+            L_snapshots=args.snapshots
         )
 
 if __name__ == "__main__":
