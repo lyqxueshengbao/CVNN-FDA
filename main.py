@@ -275,8 +275,9 @@ def main():
                 print("❌ 未找到 benchmark 模块。")
                 sys.exit(1)
 
+        # 对于 tradeoff 分析，使用指定的 SNR（默认0dB更能展示优势）
         run_accuracy_speed_tradeoff(
-            snr_db=args.snr if args.snr != 0 else 20,  # 默认20dB
+            snr_db=args.snr,
             num_samples=args.num_samples,
             L_snapshots=args.snapshots
         )
