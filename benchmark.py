@@ -718,16 +718,24 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
 
         # 输出前5个样本的详细估计结果
         print(f"\n📋 前5个样本的估计结果示例:")
-        print(f"{'#':<4} {'真实值':<20} {'CVNN':<20} {'Real-CNN':<20} {'MUSIC':<20} {'ESPRIT':<20}")
-        print("-" * 110)
+        # 动态构建表头
+        header = f"{'#':<4} {'真实值':<20}"
+        for m in methods:
+            header += f" {m:<20}"
+        print(header)
+        print("-" * (24 + 20 * len(methods)))
+
         for i in range(min(5, len(sample_results))):
             s = sample_results[i]
             true_str = f"({s['r_true']:.1f}m, {s['theta_true']:.1f}°)"
-            cvnn_str = f"({s['CVNN'][0]:.1f}m, {s['CVNN'][1]:.1f}°)"
-            rcnn_str = f"({s['Real-CNN'][0]:.1f}m, {s['Real-CNN'][1]:.1f}°)"
-            music_str = f"({s['MUSIC'][0]:.1f}m, {s['MUSIC'][1]:.1f}°)"
-            esprit_str = f"({s['ESPRIT'][0]:.1f}m, {s['ESPRIT'][1]:.1f}°)"
-            print(f"{i+1:<4} {true_str:<20} {cvnn_str:<20} {rcnn_str:<20} {music_str:<20} {esprit_str:<20}")
+            row = f"{i+1:<4} {true_str:<20}"
+            for m in methods:
+                if m in s:
+                    method_str = f"({s[m][0]:.1f}m, {s[m][1]:.1f}°)"
+                else:
+                    method_str = "N/A"
+                row += f" {method_str:<20}"
+            print(row)
 
         # 保存当前SNR的详细样本结果
         all_snr_samples[f"SNR_{snr}dB"] = sample_results
@@ -950,15 +958,25 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
         
         # 输出前5个样本的详细估计结果
         print(f"\n📋 前5个样本的估计结果示例:")
-        print(f"{'#':<4} {'真实值':<20} {'CVNN':<20} {'MUSIC':<20} {'ESPRIT':<20}")
-        print("-" * 90)
+        # 动态构建表头
+        display_methods = [m for m in methods if m != "CRB"]
+        header = f"{'#':<4} {'真实值':<20}"
+        for m in display_methods:
+            header += f" {m:<20}"
+        print(header)
+        print("-" * (24 + 20 * len(display_methods)))
+
         for i in range(min(5, len(sample_results))):
             s = sample_results[i]
             true_str = f"({s['r_true']:.1f}m, {s['theta_true']:.1f}°)"
-            cvnn_str = f"({s['CVNN'][0]:.1f}m, {s['CVNN'][1]:.1f}°)"
-            music_str = f"({s['MUSIC'][0]:.1f}m, {s['MUSIC'][1]:.1f}°)"
-            esprit_str = f"({s['ESPRIT'][0]:.1f}m, {s['ESPRIT'][1]:.1f}°)"
-            print(f"{i+1:<4} {true_str:<20} {cvnn_str:<20} {music_str:<20} {esprit_str:<20}")
+            row = f"{i+1:<4} {true_str:<20}"
+            for m in display_methods:
+                if m in s:
+                    method_str = f"({s[m][0]:.1f}m, {s[m][1]:.1f}°)"
+                else:
+                    method_str = "N/A"
+                row += f" {method_str:<20}"
+            print(row)
 
         # 保存当前快拍数的详细样本结果
         all_L_samples[f"L_{L}"] = sample_results
