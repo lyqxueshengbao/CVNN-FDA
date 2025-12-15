@@ -120,11 +120,13 @@ def plot_snr_curves(data: Dict,
             results[method]['rmse_r'].append(rmse_r)
             results[method]['rmse_theta'].append(rmse_theta)
 
-    # 绘图
+    # 绘图 - 自动适配所有方法
     colors = {
         'CVNN': '#1f77b4',
         'Real-CNN': '#2ca02c',
         'MUSIC': '#d62728',
+        'Capon': '#9467bd',
+        'Beamforming': '#8c564b',
         'ESPRIT': '#ff7f0e',
         'CRB': '#000000'
     }
@@ -132,6 +134,8 @@ def plot_snr_curves(data: Dict,
         'CVNN': 'o',
         'Real-CNN': '^',
         'MUSIC': 's',
+        'Capon': 'D',
+        'Beamforming': 'v',
         'ESPRIT': 'd',
         'CRB': 'x'
     }
@@ -302,6 +306,8 @@ def plot_error_distribution(data: Dict,
         'CVNN': '#1f77b4',
         'Real-CNN': '#2ca02c',
         'MUSIC': '#d62728',
+        'Capon': '#9467bd',
+        'Beamforming': '#8c564b',
         'ESPRIT': '#ff7f0e'
     }
 
