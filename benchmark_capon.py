@@ -68,7 +68,7 @@ def benchmark_capon(snr_list, L_snapshots, num_samples, grid_size='standard', ou
     print(f"{'='*70}")
 
     for snr in snr_list:
-        print(f"\n📡 SNR = {snr:+3d} dB")
+        print(f"\n📡 SNR = {int(snr):+3d} dB")
 
         errors_r = []
         errors_theta = []
