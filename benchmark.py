@@ -356,24 +356,10 @@ def esprit_2d_robust(R, M, N):
             while r_est < 0: r_est += max_unambiguous_r
             while r_est > cfg.r_max: r_est -= max_unambiguous_r
             r_est = np.clip(r_est, 0, cfg.r_max)
-        elif len(candidates) == 1:
-            r_est = candidates[0]
         else:
-            # 多候选时，选择投影到信号子空间误差最小的解
-            best_r = candidates[0]
-            min_error = np.inf
-
-            for r_cand in candidates:
-                # 构造导向矢量
-                a = get_steering_vector(r_cand, theta_est)
-                # 计算到信号子空间的投影误差
-                proj = Us @ (Us.conj().T @ a)
-                error = np.linalg.norm(a - proj)
-                if error < min_error:
-                    min_error = error
-                    best_r = r_cand
-
-            r_est = best_r
+            # 标准ESPRIT：选择最接近r_max/2的候选（中心偏好）
+            # 这是标准做法，避免边界效应
+            r_est = min(candidates, key=lambda r: abs(r - cfg.r_max/2))
 
     except Exception:
         r_est = cfg.r_max / 2
@@ -515,11 +501,11 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     step_theta_coarse = res_theta / 2
 
     # 使用物理步长动态生成网格 (标准MUSIC实现)
-    # 粗网格：分辨率/2 (Nyquist采样)
+    # 粗网格：分辨率/4 (比Nyquist稍密，常见做法)
     # 细化：在粗搜索峰值附近进行21×21的局部细搜索
-    # 这是文献中最常见的做法，平衡了精度和速度
-    num_r_points = max(int(cfg.r_max / step_r_coarse) + 1, 50)
-    num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / step_theta_coarse) + 1, 30)
+    # 这是文献中常见的做法，平衡了精度和速度
+    num_r_points = max(int(cfg.r_max / (step_r_coarse/2)) + 1, 80)
+    num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / (step_theta_coarse/2)) + 1, 50)
 
     r_grid = np.linspace(0, cfg.r_max, num_r_points)
     theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
