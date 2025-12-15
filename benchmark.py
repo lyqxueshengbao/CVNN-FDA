@@ -286,7 +286,107 @@ def music_2d_continuous(R, r_search_coarse, theta_search_coarse):
 
 
 # ==========================================
-# 2. 改进的 ESPRIT (相位解模糊)
+# 2. Capon (MVDR) 方法
+# ==========================================
+def capon_2d(R, r_search, theta_search):
+    """
+    Capon (最小方差无失真响应) 方法
+
+    优势:
+    - 经典方法 (1969)
+    - 稳定性好，无相位模糊
+    - 分辨率优于传统波束形成
+
+    原理:
+    P_capon(r,θ) = 1 / (a^H R^{-1} a)
+    """
+    try:
+        # 计算协方差矩阵的逆
+        R_inv = np.linalg.inv(R + 1e-6 * np.eye(R.shape[0]))  # 添加正则化
+    except:
+        # 如果矩阵奇异，使用伪逆
+        R_inv = np.linalg.pinv(R)
+
+    # 向量化搜索
+    R_grid, Theta_grid = np.meshgrid(r_search, theta_search, indexing='ij')
+    R_flat = R_grid.flatten()
+    Theta_flat = Theta_grid.flatten()
+
+    M, N = cfg.M, cfg.N
+    m_idx = np.arange(M).reshape(-1, 1)
+    n_idx = np.arange(N).reshape(-1, 1)
+    Theta_rad = np.deg2rad(Theta_flat)
+
+    # 构建导向矢量矩阵
+    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c +
+              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
+    a_tx = np.exp(1j * phi_tx)
+
+    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
+    a_rx = np.exp(1j * phi_rx)
+
+    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
+
+    # 计算Capon谱: P = 1 / (a^H R^{-1} a)
+    numerator = A.conj().T @ R_inv @ A  # (N_grid, N_grid) 对角线
+    spectrum = 1.0 / (np.abs(np.diag(numerator)) + 1e-12)
+
+    # 找到最大值
+    idx = np.argmax(spectrum)
+    best_r = R_flat[idx]
+    best_theta = Theta_flat[idx]
+
+    return float(best_r), float(best_theta)
+
+
+# ==========================================
+# 3. 传统波束形成 (Bartlett)
+# ==========================================
+def beamforming_2d(R, r_search, theta_search):
+    """
+    传统波束形成 (Bartlett方法)
+
+    优势:
+    - 最简单的方法
+    - 稳定性极好
+    - 作为性能下界
+
+    原理:
+    P_BF(r,θ) = a^H R a
+    """
+    # 向量化搜索
+    R_grid, Theta_grid = np.meshgrid(r_search, theta_search, indexing='ij')
+    R_flat = R_grid.flatten()
+    Theta_flat = Theta_grid.flatten()
+
+    M, N = cfg.M, cfg.N
+    m_idx = np.arange(M).reshape(-1, 1)
+    n_idx = np.arange(N).reshape(-1, 1)
+    Theta_rad = np.deg2rad(Theta_flat)
+
+    # 构建导向矢量矩阵
+    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c +
+              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
+    a_tx = np.exp(1j * phi_tx)
+
+    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
+    a_rx = np.exp(1j * phi_rx)
+
+    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
+
+    # 计算波束形成谱: P = a^H R a
+    spectrum = np.abs(np.diag(A.conj().T @ R @ A))
+
+    # 找到最大值
+    idx = np.argmax(spectrum)
+    best_r = R_flat[idx]
+    best_theta = Theta_flat[idx]
+
+    return float(best_r), float(best_theta)
+
+
+# ==========================================
+# 4. 改进的 ESPRIT (相位解模糊) - 可选
 # ==========================================
 def esprit_2d_robust(R, M, N):
     """
@@ -480,7 +580,8 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     if fast_mode:
         methods = ["CVNN", "Real-CNN"]
     else:
-        methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT"]
+        # 使用稳定的传统方法作为baseline
+        methods = ["CVNN", "Real-CNN", "MUSIC", "Capon", "Beamforming"]
 
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
@@ -556,23 +657,43 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
             sample_data["Real-CNN"] = (r_est_rcnn, th_est_rcnn)
 
             # MUSIC (可选连续优化版本)
-            t0 = time.time()
-            if music_continuous:
-                r_est_music, th_est_music = music_2d_continuous(R_complex, r_grid, theta_grid)
-            else:
-                r_est_music, th_est_music = music_2d_refined(R_complex, r_grid, theta_grid)
-            errors["MUSIC"]["r"].append((r_est_music-r_true)**2)
-            errors["MUSIC"]["theta"].append((th_est_music-theta_true)**2)
-            errors["MUSIC"]["time"].append(time.time()-t0)
-            sample_data["MUSIC"] = (r_est_music, th_est_music)
+            if "MUSIC" in methods:
+                t0 = time.time()
+                if music_continuous:
+                    r_est_music, th_est_music = music_2d_continuous(R_complex, r_grid, theta_grid)
+                else:
+                    r_est_music, th_est_music = music_2d_refined(R_complex, r_grid, theta_grid)
+                errors["MUSIC"]["r"].append((r_est_music-r_true)**2)
+                errors["MUSIC"]["theta"].append((th_est_music-theta_true)**2)
+                errors["MUSIC"]["time"].append(time.time()-t0)
+                sample_data["MUSIC"] = (r_est_music, th_est_music)
 
-            # ESPRIT
-            t0 = time.time()
-            r_est_esprit, th_est_esprit = esprit_2d_robust(R_complex, cfg.M, cfg.N)
-            errors["ESPRIT"]["r"].append((r_est_esprit-r_true)**2)
-            errors["ESPRIT"]["theta"].append((th_est_esprit-theta_true)**2)
-            errors["ESPRIT"]["time"].append(time.time()-t0)
-            sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
+            # Capon
+            if "Capon" in methods:
+                t0 = time.time()
+                r_est_capon, th_est_capon = capon_2d(R_complex, r_grid, theta_grid)
+                errors["Capon"]["r"].append((r_est_capon-r_true)**2)
+                errors["Capon"]["theta"].append((th_est_capon-theta_true)**2)
+                errors["Capon"]["time"].append(time.time()-t0)
+                sample_data["Capon"] = (r_est_capon, th_est_capon)
+
+            # Beamforming
+            if "Beamforming" in methods:
+                t0 = time.time()
+                r_est_bf, th_est_bf = beamforming_2d(R_complex, r_grid, theta_grid)
+                errors["Beamforming"]["r"].append((r_est_bf-r_true)**2)
+                errors["Beamforming"]["theta"].append((th_est_bf-theta_true)**2)
+                errors["Beamforming"]["time"].append(time.time()-t0)
+                sample_data["Beamforming"] = (r_est_bf, th_est_bf)
+
+            # ESPRIT (可选)
+            if "ESPRIT" in methods:
+                t0 = time.time()
+                r_est_esprit, th_est_esprit = esprit_2d_robust(R_complex, cfg.M, cfg.N)
+                errors["ESPRIT"]["r"].append((r_est_esprit-r_true)**2)
+                errors["ESPRIT"]["theta"].append((th_est_esprit-theta_true)**2)
+                errors["ESPRIT"]["time"].append(time.time()-t0)
+                sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
 
             sample_results.append(sample_data)
 
@@ -648,8 +769,22 @@ def plot_results(snr_list, results, L_snapshots=None):
     except: pass
 
     methods = [m for m in results.keys() if m != "CRB"]
-    colors = {'CVNN': '#1f77b4', 'Real-CNN': '#2ca02c', 'MUSIC': '#d62728', 'ESPRIT': '#ff7f0e'}
-    markers = {'CVNN': 'o', 'Real-CNN': '^', 'MUSIC': 's', 'ESPRIT': 'd'}
+    colors = {
+        'CVNN': '#1f77b4',
+        'Real-CNN': '#2ca02c',
+        'MUSIC': '#d62728',
+        'Capon': '#9467bd',
+        'Beamforming': '#8c564b',
+        'ESPRIT': '#ff7f0e'
+    }
+    markers = {
+        'CVNN': 'o',
+        'Real-CNN': '^',
+        'MUSIC': 's',
+        'Capon': 'D',
+        'Beamforming': 'v',
+        'ESPRIT': 'd'
+    }
 
     fig = plt.figure(figsize=(20, 12))
 
@@ -852,8 +987,22 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     print(f"\n💾 详细结果已保存到: {json_path}")
 
     # 使用与 plot_results 一致的颜色和标记
-    colors = {'CVNN': '#1f77b4', 'Real-CNN': '#2ca02c', 'MUSIC': '#d62728', 'ESPRIT': '#ff7f0e'}
-    markers = {'CVNN': 'o', 'Real-CNN': '^', 'MUSIC': 's', 'ESPRIT': 'd'}
+    colors = {
+        'CVNN': '#1f77b4',
+        'Real-CNN': '#2ca02c',
+        'MUSIC': '#d62728',
+        'Capon': '#9467bd',
+        'Beamforming': '#8c564b',
+        'ESPRIT': '#ff7f0e'
+    }
+    markers = {
+        'CVNN': 'o',
+        'Real-CNN': '^',
+        'MUSIC': 's',
+        'Capon': 'D',
+        'Beamforming': 'v',
+        'ESPRIT': 'd'
+    }
     
     plt.figure(figsize=(10, 6))
     for m in methods:
