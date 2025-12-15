@@ -328,8 +328,9 @@ def capon_2d(R, r_search, theta_search):
     A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
 
     # 计算Capon谱: P = 1 / (a^H R^{-1} a)
-    numerator = A.conj().T @ R_inv @ A  # (N_grid, N_grid) 对角线
-    spectrum = 1.0 / (np.abs(np.diag(numerator)) + 1e-12)
+    # 对每个导向矢量计算: spectrum[i] = 1 / (A[:, i]^H @ R_inv @ A[:, i])
+    temp = R_inv @ A  # (MN, N_grid)
+    spectrum = 1.0 / (np.sum(A.conj() * temp, axis=0).real + 1e-12)
 
     # 找到最大值
     idx = np.argmax(spectrum)
@@ -375,7 +376,9 @@ def beamforming_2d(R, r_search, theta_search):
     A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
 
     # 计算波束形成谱: P = a^H R a
-    spectrum = np.abs(np.diag(A.conj().T @ R @ A))
+    # 对每个导向矢量计算: spectrum[i] = A[:, i]^H @ R @ A[:, i]
+    temp = R @ A  # (MN, N_grid)
+    spectrum = np.abs(np.sum(A.conj() * temp, axis=0))
 
     # 找到最大值
     idx = np.argmax(spectrum)
