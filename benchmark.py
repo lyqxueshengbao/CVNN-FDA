@@ -129,15 +129,14 @@ def compute_crb_average(snr_db, L=None, num_samples=200):
 
 
 # ==========================================
-# 1. 改进的 2D-MUSIC (向量化 + 两级搜索)
+# 1. 标准 2D-MUSIC (双重循环 + 两级搜索)
 # ==========================================
 def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
     """
-    [标准改进版] 向量化 2D-MUSIC
+    [标准实现] 2D-MUSIC 算法
     
-    优势: 
-    - 速度极快 (矩阵运算代替 for 循环)
-    - 允许使用细网格，避免漏掉 MUSIC 的尖峰
+    采用经典的双重循环实现，逐点计算MUSIC谱
+    这是教科书标准写法，用于公平的算法复杂度对比
     """
     M, N = cfg.M, cfg.N
     
@@ -146,40 +145,28 @@ def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
     K = 1  # 单目标
     Un = v[:, :-K]  # (MN, MN-K)
     
-    # 2. 向量化构建导向矢量字典
-    R_grid, Theta_grid = np.meshgrid(r_search_coarse, theta_search_coarse, indexing='ij')
-    R_flat = R_grid.flatten()
-    Theta_flat = Theta_grid.flatten()
+    # 2. 双重循环计算MUSIC谱 (标准实现)
+    n_r = len(r_search_coarse)
+    n_theta = len(theta_search_coarse)
+    spectrum = np.zeros((n_r, n_theta))
     
-    m_idx = np.arange(M).reshape(-1, 1)  # (M, 1)
-    n_idx = np.arange(N).reshape(-1, 1)  # (N, 1)
-    Theta_rad = np.deg2rad(Theta_flat)
+    for i, r in enumerate(r_search_coarse):
+        for j, theta in enumerate(theta_search_coarse):
+            # 生成导向矢量
+            a = get_steering_vector(r, theta)
+            # MUSIC谱: P = 1 / (a^H * Un * Un^H * a)
+            proj = Un.conj().T @ a
+            spectrum[i, j] = 1.0 / (np.sum(np.abs(proj)**2) + 1e-12)
     
-    # 发射相位: -4*pi*df*m*r/c + 2*pi*d*m*sin(theta)/lam
-    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c + 
-              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
-    a_tx = np.exp(1j * phi_tx)  # (M, N_grid)
-    
-    # 接收相位: 2*pi*d*n*sin(theta)/lam
-    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
-    a_rx = np.exp(1j * phi_rx)  # (N, N_grid)
-    
-    # Khatri-Rao 积: A[m*N + n, :] = a_tx[m, :] * a_rx[n, :]
-    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
-    
-    # 3. 矩阵化计算谱: P = 1 / sum(|Un^H * A|^2, axis=0)
-    proj = Un.conj().T @ A  # (MN-K, N_grid)
-    spectrum = 1.0 / (np.sum(np.abs(proj)**2, axis=0) + 1e-12)
-    
-    # 4. 找到粗搜索最大值
-    idx = np.argmax(spectrum)
-    best_r = R_flat[idx]
-    best_theta = Theta_flat[idx]
+    # 3. 找到粗搜索最大值
+    max_idx = np.unravel_index(np.argmax(spectrum), spectrum.shape)
+    best_r = r_search_coarse[max_idx[0]]
+    best_theta = theta_search_coarse[max_idx[1]]
     
     if not refine:
         return best_r, best_theta
     
-    # 5. 细搜索 (局部小范围)
+    # 4. 细搜索 (局部小范围，同样用循环)
     r_step = (r_search_coarse[-1] - r_search_coarse[0]) / (len(r_search_coarse) - 1) if len(r_search_coarse) > 1 else 50
     theta_step = (theta_search_coarse[-1] - theta_search_coarse[0]) / (len(theta_search_coarse) - 1) if len(theta_search_coarse) > 1 else 2
     
@@ -188,7 +175,7 @@ def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
     theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step/2), 
                              min(cfg.theta_max, best_theta + theta_step/2), 21)
     
-    # 细搜索用简单循环 (点数少)
+    # 细搜索循环
     max_p = -1
     refined_r, refined_theta = best_r, best_theta
     
@@ -208,12 +195,12 @@ def music_2d_refined(R, r_search_coarse, theta_search_coarse, refine=True):
 # ==========================================
 def music_2d_continuous(R, r_search_coarse, theta_search_coarse):
     """
-    [高精度修复版] 连续优化 MUSIC
+    [高精度版] 连续优化 MUSIC
     
-    策略: 粗网格搜索 + Scipy 连续优化 (Nelder-Mead)
+    策略: 粗网格搜索 (标准循环) + Scipy 连续优化 (Nelder-Mead)
     解决: 彻底消除"栅栏效应"，在高 SNR 下能紧贴 CRB
     
-    注意: 比 music_2d_refined 慢 ~3-5 倍，但精度更高
+    注意: 比 music_2d_refined 慢，但精度更高
     """
     M, N = cfg.M, cfg.N
     
@@ -221,29 +208,21 @@ def music_2d_continuous(R, r_search_coarse, theta_search_coarse):
     w, v = np.linalg.eigh(R)
     Un = v[:, :-1]  # 噪声子空间 (假设单目标)
     
-    # --- 阶段一: 向量化粗搜索 ---
-    R_grid, Theta_grid = np.meshgrid(r_search_coarse, theta_search_coarse, indexing='ij')
-    R_flat = R_grid.flatten()
-    Theta_flat = Theta_grid.flatten()
+    # --- 阶段一: 标准双重循环粗搜索 ---
+    n_r = len(r_search_coarse)
+    n_theta = len(theta_search_coarse)
+    spectrum_denom = np.zeros((n_r, n_theta))
     
-    m_idx = np.arange(M).reshape(-1, 1)
-    n_idx = np.arange(N).reshape(-1, 1)
-    Theta_rad = np.deg2rad(Theta_flat)
+    for i, r in enumerate(r_search_coarse):
+        for j, theta in enumerate(theta_search_coarse):
+            a = get_steering_vector(r, theta)
+            proj = Un.conj().T @ a
+            spectrum_denom[i, j] = np.sum(np.abs(proj)**2)
     
-    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c +
-              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
-    a_tx = np.exp(1j * phi_tx)
-    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
-    a_rx = np.exp(1j * phi_rx)
-    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
-    
-    # 计算谱 (分母越小越好)
-    proj = Un.conj().T @ A
-    spectrum_denom = np.sum(np.abs(proj)**2, axis=0)
-    
-    idx = np.argmin(spectrum_denom)  # 找分母最小值
-    r0 = R_flat[idx]
-    theta0 = Theta_flat[idx]
+    # 找分母最小值
+    min_idx = np.unravel_index(np.argmin(spectrum_denom), spectrum_denom.shape)
+    r0 = r_search_coarse[min_idx[0]]
+    theta0 = theta_search_coarse[min_idx[1]]
     
     # --- 阶段二: 连续优化 (Nelder-Mead) ---
     def objective_function(x):
