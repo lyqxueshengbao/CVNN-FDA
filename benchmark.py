@@ -615,6 +615,54 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
             music_str = f"({s['MUSIC'][0]:.1f}m, {s['MUSIC'][1]:.1f}°)"
             esprit_str = f"({s['ESPRIT'][0]:.1f}m, {s['ESPRIT'][1]:.1f}°)"
             print(f"{i+1:<4} {true_str:<20} {cvnn_str:<20} {rcnn_str:<20} {music_str:<20} {esprit_str:<20}")
+        
+        # 保存每个SNR下的详细预测结果到JSON文件
+        os.makedirs("results", exist_ok=True)
+        predictions_data = {
+            "snr_db": snr,
+            "L_snapshots": L,
+            "num_samples": num_samples,
+            "config": {
+                "r_max": cfg.r_max,
+                "r_min": cfg.r_min,
+                "theta_max": cfg.theta_max,
+                "theta_min": cfg.theta_min,
+                "M": cfg.M,
+                "N": cfg.N,
+                "delta_f": cfg.delta_f
+            },
+            "predictions": []
+        }
+        for idx, s in enumerate(sample_results):
+            pred_item = {
+                "sample_id": idx,
+                "ground_truth": {
+                    "r": float(s['r_true']),
+                    "theta": float(s['theta_true'])
+                },
+                "CVNN": {
+                    "r": float(s['CVNN'][0]),
+                    "theta": float(s['CVNN'][1])
+                },
+                "Real-CNN": {
+                    "r": float(s['Real-CNN'][0]),
+                    "theta": float(s['Real-CNN'][1])
+                },
+                "MUSIC": {
+                    "r": float(s['MUSIC'][0]),
+                    "theta": float(s['MUSIC'][1])
+                },
+                "ESPRIT": {
+                    "r": float(s['ESPRIT'][0]),
+                    "theta": float(s['ESPRIT'][1])
+                }
+            }
+            predictions_data["predictions"].append(pred_item)
+        
+        pred_json_path = f"results/predictions_SNR{snr}dB_L{L}.json"
+        with open(pred_json_path, 'w', encoding='utf-8') as f:
+            json.dump(predictions_data, f, indent=2, ensure_ascii=False)
+        print(f"\n💾 预测结果已保存: {pred_json_path}")
 
     return snr_list, results, L
 
