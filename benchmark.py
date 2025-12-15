@@ -514,8 +514,11 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     step_r_coarse = res_r / 2
     step_theta_coarse = res_theta / 2
 
-    # 使用物理步长动态生成网格 (避免栅栏效应 Grid Straddling Loss)
-    num_r_points = max(int(cfg.r_max / step_r_coarse) + 1, 50)  # 至少50点
+    # 使用物理步长动态生成网格 (标准MUSIC实现)
+    # 粗网格：分辨率/2 (Nyquist采样)
+    # 细化：在粗搜索峰值附近进行21×21的局部细搜索
+    # 这是文献中最常见的做法，平衡了精度和速度
+    num_r_points = max(int(cfg.r_max / step_r_coarse) + 1, 50)
     num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / step_theta_coarse) + 1, 30)
 
     r_grid = np.linspace(0, cfg.r_max, num_r_points)
