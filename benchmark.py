@@ -488,7 +488,7 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     dummy = torch.randn(1, 2, cfg.M * cfg.N, cfg.M * cfg.N).to(device)
     for _ in range(3): cvnn(dummy); real_cnn(dummy)
 
-    snr_list = [-5, 0, 5]
+    snr_list = [-5, 0, 5, 10, 15, 20]
 
     # 快速模式只测神经网络
     if fast_mode:
@@ -498,6 +498,9 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
 
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
+
+    # 存储所有SNR的详细样本结果
+    all_snr_samples = {}
 
     # ========================================
     # 基于物理分辨率的网格设置 (学术标准)
@@ -616,6 +619,34 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
             esprit_str = f"({s['ESPRIT'][0]:.1f}m, {s['ESPRIT'][1]:.1f}°)"
             print(f"{i+1:<4} {true_str:<20} {cvnn_str:<20} {rcnn_str:<20} {music_str:<20} {esprit_str:<20}")
 
+        # 保存当前SNR的详细样本结果
+        all_snr_samples[f"SNR_{snr}dB"] = sample_results
+
+    # 保存所有详细结果到JSON文件
+    json_output = {
+        "config": {
+            "L_snapshots": L,
+            "num_samples": num_samples,
+            "snr_list": snr_list,
+            "methods": methods,
+            "fast_mode": fast_mode,
+            "music_continuous": music_continuous
+        },
+        "summary": {
+            m: {
+                "rmse_r": results[m]["rmse_r"],
+                "rmse_theta": results[m]["rmse_theta"],
+                "time_ms": [t*1000 for t in results[m]["time"]]
+            } for m in list(methods) + ["CRB"]
+        },
+        "detailed_samples": all_snr_samples
+    }
+
+    json_path = f"results/benchmark_L{L}_detailed.json"
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(json_output, f, indent=2, ensure_ascii=False)
+    print(f"\n💾 详细结果已保存到: {json_path}")
+
     return snr_list, results, L
 
 
@@ -712,7 +743,10 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     
     methods = ["MUSIC", "ESPRIT", "CVNN", "CRB"]
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
-    
+
+    # 存储所有快拍数的详细样本结果
+    all_L_samples = {}
+
     # 基于物理分辨率动态生成网格 (与 run_benchmark 保持一致)
     res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
     res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
@@ -801,6 +835,32 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
             music_str = f"({s['MUSIC'][0]:.1f}m, {s['MUSIC'][1]:.1f}°)"
             esprit_str = f"({s['ESPRIT'][0]:.1f}m, {s['ESPRIT'][1]:.1f}°)"
             print(f"{i+1:<4} {true_str:<20} {cvnn_str:<20} {music_str:<20} {esprit_str:<20}")
+
+        # 保存当前快拍数的详细样本结果
+        all_L_samples[f"L_{L}"] = sample_results
+
+    # 保存所有详细结果到JSON文件
+    json_output = {
+        "config": {
+            "snr_db": snr_db,
+            "L_list": L_list,
+            "num_samples": num_samples,
+            "methods": [m for m in methods if m != "CRB"],
+            "use_random_model": use_random_model
+        },
+        "summary": {
+            m: {
+                "rmse_r": results[m]["rmse_r"],
+                "time_ms": [t*1000 for t in results[m]["time"]] if m != "CRB" else []
+            } for m in methods
+        },
+        "detailed_samples": all_L_samples
+    }
+
+    json_path = f"results/snapshots_SNR{snr_db}dB_detailed.json"
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(json_output, f, indent=2, ensure_ascii=False)
+    print(f"\n💾 详细结果已保存到: {json_path}")
 
     # 使用与 plot_results 一致的颜色和标记
     colors = {'CVNN': '#1f77b4', 'Real-CNN': '#2ca02c', 'MUSIC': '#d62728', 'ESPRIT': '#ff7f0e'}
