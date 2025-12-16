@@ -175,6 +175,8 @@ def main():
     parser.add_argument('--num-samples', type=int, default=500, help='评测样本数')
     parser.add_argument('--fast', action='store_true', help='快速模式 (只测NN)')
     parser.add_argument('--tradeoff', action='store_true', help='运行精度-速度权衡分析')
+    parser.add_argument('--benchmark-legacy', action='store_true', 
+                        help='运行 Legacy Methods vs CVNN 对比实验 (复现 Matlab 传统算法)')
 
     # 保留此参数以兼容旧脚本，但在代码中会将其拦截
     parser.add_argument('--music-continuous', action='store_true',
@@ -281,6 +283,20 @@ def main():
             num_samples=args.num_samples,
             L_snapshots=args.snapshots
         )
+
+    elif args.benchmark_legacy:
+        # 运行 Legacy vs CVNN 对比实验
+        try:
+            from benchmark_legacy_vs_cvnn import run_legacy_benchmark, plot_results
+        except ImportError:
+            print("❌ 未找到 benchmark_legacy_vs_cvnn.py 模块。")
+            sys.exit(1)
+        
+        snr_list, results, L = run_legacy_benchmark(
+            num_samples=args.num_samples,
+            L_snapshots=args.snapshots
+        )
+        plot_results(snr_list, results, L_snapshots=L)
 
 if __name__ == "__main__":
     main()
