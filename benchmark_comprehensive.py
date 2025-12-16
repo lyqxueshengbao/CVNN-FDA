@@ -445,6 +445,30 @@ def evaluate_cvnn(model_path, SNR_dB_list, num_samples=1000, batch_size=64,
                     reduction = 32 // weight_shape[0]  # 32是通道数
                     break
 
+        # 自动从权重推断 reduction（如果未启用 auto_detect）
+        if not auto_detect and attention_type != 'standard':
+            keys = list(state_dict.keys())
+            for key in keys:
+                # 检查第一层注意力的权重
+                if 'attn1.global_attn.fc.0.weight' in key:  # Dual
+                    weight_shape = state_dict[key].shape
+                    inferred_reduction = 32 // weight_shape[0]
+                    if inferred_reduction != reduction:
+                        print(f"⚠ 检测到 reduction 不匹配！")
+                        print(f"  指定值: {reduction}, 从权重推断: {inferred_reduction}")
+                        print(f"  使用推断值: {inferred_reduction}")
+                        reduction = inferred_reduction
+                    break
+                elif 'attn1.fc.0.weight' in key:  # SE/FAR
+                    weight_shape = state_dict[key].shape
+                    inferred_reduction = 32 // weight_shape[0]
+                    if inferred_reduction != reduction:
+                        print(f"⚠ 检测到 reduction 不匹配！")
+                        print(f"  指定值: {reduction}, 从权重推断: {inferred_reduction}")
+                        print(f"  使用推断值: {inferred_reduction}")
+                        reduction = inferred_reduction
+                    break
+
         # 根据指定的参数实例化模型
         if attention_type == 'dual':
             model = FDA_CVNN_Attention(attention_type='dual', se_reduction=reduction).to(device)
