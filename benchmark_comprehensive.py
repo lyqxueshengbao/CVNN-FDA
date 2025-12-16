@@ -578,7 +578,173 @@ def plot_comparison(all_results, crlb_results, save_path='results'):
     plt.savefig(f'{save_path}/time_vs_snr.pdf')
     print(f"已保存时间随SNR变化图: {save_path}/time_vs_snr.png")
 
-    plt.show()
+    print("=" * 60)
+
+
+# ==================== 接口函数（供 main.py 调用） ====================
+def run_comprehensive_benchmark(L_snapshots=None, num_samples_cvnn=1000,
+                                monte_carlo_classical=100,
+                                attention_type='dual', reduction=8):
+    """
+    运行综合对比实验的接口函数
+
+    参数:
+        L_snapshots: 快拍数（None表示使用config默认值）
+        num_samples_cvnn: CVNN测试样本数
+        monte_carlo_classical: 传统算法蒙特卡洛次数
+        attention_type: CVNN注意力类型
+        reduction: CVNN压缩比
+    """
+    # ========== 参数设置 ==========
+    M = cfg.M
+    N = cfg.N
+    f0 = cfg.f0
+    Delta_f = cfg.delta_f
+    c0 = cfg.c
+    lambda_ = cfg.wavelength
+    d = cfg.d
+    K = 1
+    theta_true = 10.0 * np.pi / 180
+    r_true = 2000.0
+    L = L_snapshots if L_snapshots else cfg.L_snapshots
+
+    SNR_dB_list = np.arange(-15, 25, 5)
+
+    Grid_theta = np.arange(-50, 51, 1)
+    Grid_r = np.arange(0, 5001, 100)
+
+    model_path = cfg.model_save_path
+
+    save_path = 'results/comprehensive_benchmark'
+    os.makedirs(save_path, exist_ok=True)
+
+    # ========== 计算 CRLB ==========
+    print("\n" + "=" * 60)
+    print("计算 CRLB...")
+    print("=" * 60)
+
+    crlb_theta_list = []
+    crlb_r_list = []
+
+    for SNR in SNR_dB_list:
+        crlb_theta, crlb_r = crlb_fda_mimo(
+            theta_true, r_true, M, N, f0, Delta_f, c0, d, lambda_, L, SNR
+        )
+        crlb_theta_list.append(crlb_theta[0])
+        crlb_r_list.append(crlb_r[0])
+
+    crlb_results = {
+        'snr_db_list': SNR_dB_list.tolist(),
+        'crlb_theta': crlb_theta_list,
+        'crlb_r': crlb_r_list
+    }
+
+    # ========== 评测 CVNN（优先评测，快速验证模型加载） ==========
+    print("\n" + "=" * 60)
+    print("评测 CVNN 模型...")
+    print("=" * 60)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"使用设备: {device}")
+
+    cvnn_results = evaluate_cvnn(
+        model_path, SNR_dB_list, num_samples_cvnn,
+        batch_size=64, device=device,
+        attention_type=attention_type,
+        reduction=reduction,
+        auto_detect=False
+    )
+
+    # ========== 评测传统算法 ==========
+    print("\n" + "=" * 60)
+    print("评测传统算法...")
+    print("=" * 60)
+
+    params = {
+        'M': M, 'N': N, 'Delta_f': Delta_f, 'c0': c0, 'd': d, 'lambda_': lambda_,
+        'K': K, 'L': L, 'theta_true': theta_true, 'r_true': r_true,
+        'Grid_theta': Grid_theta, 'Grid_r': Grid_r
+    }
+
+    classical_results = []
+
+    # 2D-MUSIC
+    music_results = evaluate_classical_algorithm(
+        '2D-MUSIC', music_algorithm, params, SNR_dB_list, monte_carlo_classical
+    )
+    classical_results.append(music_results)
+
+    # 2D-ESPRIT
+    esprit_results = evaluate_classical_algorithm(
+        '2D-ESPRIT', esprit_algorithm, params, SNR_dB_list, monte_carlo_classical
+    )
+    classical_results.append(esprit_results)
+
+    # OMP
+    omp_results = evaluate_classical_algorithm(
+        'OMP', omp_algorithm, params, SNR_dB_list, monte_carlo_classical
+    )
+    classical_results.append(omp_results)
+
+    # ========== 合并结果 ==========
+    all_results = [cvnn_results] + classical_results
+
+    # ========== 保存结果 ==========
+    print("\n" + "=" * 60)
+    print("保存结果...")
+    print("=" * 60)
+
+    results_dict = {
+        'crlb': crlb_results,
+        'algorithms': all_results,
+        'parameters': {
+            'M': M, 'N': N, 'f0': f0, 'Delta_f': Delta_f,
+            'theta_true_deg': theta_true * 180 / np.pi,
+            'r_true_m': r_true,
+            'L': L,
+            'Monte_Carlo_classical': monte_carlo_classical,
+            'num_samples_cvnn': num_samples_cvnn,
+            'attention_type': attention_type,
+            'reduction': reduction
+        }
+    }
+
+    with open(f'{save_path}/benchmark_results.json', 'w', encoding='utf-8') as f:
+        json.dump(results_dict, f, indent=2, ensure_ascii=False)
+    print(f"已保存结果: {save_path}/benchmark_results.json")
+
+    # ========== 绘制对比图 ==========
+    print("\n" + "=" * 60)
+    print("绘制对比图...")
+    print("=" * 60)
+
+    plot_comparison(all_results, crlb_results, save_path)
+
+    # ========== 打印性能总结 ==========
+    print("\n" + "=" * 60)
+    print("性能总结 (SNR = 20dB)")
+    print("=" * 60)
+    print(f"{'Algorithm':<15} {'Angle RMSE (deg)':<20} {'Range RMSE (m)':<20} {'Time (ms)':<15}")
+    print("-" * 70)
+
+    snr_20_idx = np.where(SNR_dB_list == 20)[0]
+    if len(snr_20_idx) > 0:
+        idx = snr_20_idx[0]
+        for result in all_results:
+            algo = result['algorithm']
+            angle_rmse = result['rmse_theta'][idx]
+            range_rmse = result['rmse_r'][idx]
+            avg_time = result['avg_time'][idx] * 1000
+            print(f"{algo:<15} {angle_rmse:<20.4f} {range_rmse:<20.4f} {avg_time:<15.4f}")
+
+        crlb_angle = crlb_results['crlb_theta'][idx]
+        crlb_range = crlb_results['crlb_r'][idx]
+        print("-" * 70)
+        print(f"{'CRLB':<15} {crlb_angle:<20.4f} {crlb_range:<20.4f} {'-':<15}")
+
+    print("\n" + "=" * 60)
+    print("评测完成！")
+    print("=" * 60)
 
 
 # ==================== 主函数 ====================

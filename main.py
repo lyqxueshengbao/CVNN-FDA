@@ -175,8 +175,17 @@ def main():
     parser.add_argument('--num-samples', type=int, default=500, help='评测样本数')
     parser.add_argument('--fast', action='store_true', help='快速模式 (只测NN)')
     parser.add_argument('--tradeoff', action='store_true', help='运行精度-速度权衡分析')
-    parser.add_argument('--benchmark-legacy', action='store_true', 
+    parser.add_argument('--benchmark-legacy', action='store_true',
                         help='运行 Legacy Methods vs CVNN 对比实验 (复现 Matlab 传统算法)')
+    parser.add_argument('--comprehensive-benchmark', action='store_true',
+                        help='运行综合对比实验 (CVNN + MUSIC + ESPRIT + OMP + CRLB)')
+    parser.add_argument('--attention-type', type=str, default='dual',
+                        choices=['dual', 'se', 'far', 'standard'],
+                        help='CVNN注意力类型 (用于comprehensive-benchmark)')
+    parser.add_argument('--reduction', type=int, default=8,
+                        help='注意力模块压缩比 (用于comprehensive-benchmark)')
+    parser.add_argument('--monte-carlo', type=int, default=100,
+                        help='传统算法蒙特卡洛次数 (用于comprehensive-benchmark)')
 
     # 保留此参数以兼容旧脚本，但在代码中会将其拦截
     parser.add_argument('--music-continuous', action='store_true',
@@ -291,12 +300,39 @@ def main():
         except ImportError:
             print("❌ 未找到 benchmark_legacy_vs_cvnn.py 模块。")
             sys.exit(1)
-        
+
         snr_list, results, L = run_legacy_benchmark(
             num_samples=args.num_samples,
             L_snapshots=args.snapshots
         )
         plot_results(snr_list, results, L_snapshots=L)
+
+    elif args.comprehensive_benchmark:
+        # 运行综合对比实验 (CVNN + MUSIC + ESPRIT + OMP + CRLB)
+        print("\n" + "=" * 60)
+        print("运行综合对比实验")
+        print("=" * 60)
+        print(f"快拍数: L = {args.snapshots if args.snapshots else cfg.L_snapshots}")
+        print(f"测试样本数: {args.num_samples}")
+        print(f"蒙特卡洛次数: {args.monte_carlo}")
+        print(f"CVNN 注意力类型: {args.attention_type}")
+        print(f"CVNN 压缩比: {args.reduction}")
+        print("=" * 60)
+
+        try:
+            import benchmark_comprehensive as bc
+        except ImportError:
+            print("❌ 未找到 benchmark_comprehensive.py 模块。")
+            sys.exit(1)
+
+        # 调用综合评测（使用命令行参数）
+        bc.run_comprehensive_benchmark(
+            L_snapshots=args.snapshots,
+            num_samples_cvnn=args.num_samples,
+            monte_carlo_classical=args.monte_carlo,
+            attention_type=args.attention_type,
+            reduction=args.reduction
+        )
 
 if __name__ == "__main__":
     main()
