@@ -23,6 +23,55 @@ rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
 rcParams['axes.unicode_minus'] = False
 
 
+# ==================== 模型路径查找 ====================
+def find_best_model_path(L_snapshots=None, attention_type=None):
+    """
+    自动查找最佳模型权重文件（根据快拍数和注意力类型）
+
+    参数:
+        L_snapshots: 快拍数
+        attention_type: 注意力类型 ('dual', 'se', 'far', 'standard')
+
+    返回:
+        模型文件路径
+    """
+    L = L_snapshots or cfg.L_snapshots
+    checkpoint_dir = cfg.checkpoint_dir
+    candidates = []
+
+    # 优先级1: 指定注意力类型 + 快拍数
+    if attention_type and attention_type != 'standard':
+        candidates.append(f"{checkpoint_dir}/fda_cvnn_{attention_type}_L{L}_best.pth")
+
+    # 优先级2: 任意注意力类型 + 快拍数
+    import glob
+    pattern = f"{checkpoint_dir}/fda_cvnn_*_L{L}_best.pth"
+    candidates.extend(glob.glob(pattern))
+
+    # 优先级3: 快拍数（无注意力标识）
+    candidates.append(f"{checkpoint_dir}/fda_cvnn_L{L}_best.pth")
+
+    # 优先级4: Lrandom 通用模型
+    pattern_random = f"{checkpoint_dir}/fda_cvnn_*_Lrandom_best.pth"
+    candidates.extend(glob.glob(pattern_random))
+    candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
+
+    # 优先级5: 指定注意力类型（无快拍标识）
+    if attention_type and attention_type != 'standard':
+        candidates.append(f"{checkpoint_dir}/fda_cvnn_{attention_type}_best.pth")
+
+    # 优先级6: 默认模型
+    candidates.append(f"{checkpoint_dir}/fda_cvnn_best.pth")
+
+    # 返回第一个存在的文件
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    # 如果都不存在，返回默认路径
+    return f"{checkpoint_dir}/fda_cvnn_best.pth"
+
+
 # ==================== CRLB 计算 ====================
 def crlb_fda_mimo(theta_true, r_true, M, N, f0, Delta_f, c0, d, lambda_, L, SNR_dB):
     """
@@ -345,12 +394,13 @@ def evaluate_classical_algorithm(algorithm_name, algorithm_func, params,
 
 # ==================== CVNN 评测 ====================
 def evaluate_cvnn(model_path, SNR_dB_list, num_samples=1000, batch_size=64,
-                  device='cuda', attention_type='dual', reduction=8, auto_detect=False):
+                  device='cuda', attention_type='dual', reduction=8, auto_detect=False,
+                  L_snapshots=None):
     """
     评测 CVNN 模型在多个SNR下的性能
 
     参数:
-        model_path: 模型权重路径
+        model_path: 模型权重路径（如果为None或默认路径，会自动查找）
         SNR_dB_list: SNR列表
         num_samples: 每个SNR的测试样本数
         batch_size: 批次大小
@@ -358,10 +408,16 @@ def evaluate_cvnn(model_path, SNR_dB_list, num_samples=1000, batch_size=64,
         attention_type: 注意力类型 ('dual', 'se', 'far', 'standard')
         reduction: 注意力模块的压缩比 (4, 8, 16等)
         auto_detect: 是否自动检测模型类型（默认False，使用手动指定）
+        L_snapshots: 快拍数（用于查找对应的模型文件）
 
     返回:
         results: 评测结果字典
     """
+    # 如果是默认路径或None，自动查找最佳模型
+    if model_path is None or model_path == cfg.model_save_path:
+        model_path = find_best_model_path(L_snapshots, attention_type)
+        print(f"🔍 自动选择模型: {model_path}")
+
     if model_path and os.path.exists(model_path):
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
@@ -652,7 +708,8 @@ def run_comprehensive_benchmark(L_snapshots=None, num_samples_cvnn=1000,
         batch_size=64, device=device,
         attention_type=attention_type,
         reduction=reduction,
-        auto_detect=False
+        auto_detect=False,
+        L_snapshots=L  # 传递快拍数，用于查找对应模型
     )
 
     # ========== 评测传统算法 ==========
@@ -820,7 +877,8 @@ def main():
         batch_size=64, device=device,
         attention_type=CVNN_ATTENTION_TYPE,
         reduction=CVNN_REDUCTION,
-        auto_detect=CVNN_AUTO_DETECT
+        auto_detect=CVNN_AUTO_DETECT,
+        L_snapshots=L  # 传递快拍数，用于查找对应模型
     )
 
     # ========== 评测传统算法 ==========
