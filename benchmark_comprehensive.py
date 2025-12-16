@@ -14,7 +14,7 @@ from tqdm import tqdm
 from numpy.linalg import eig, pinv, inv
 
 import config as cfg
-from model import FDA_CVNN, FDA_CVNN_Light
+from model import FDA_CVNN, FDA_CVNN_Light, FDA_CVNN_Attention
 from dataset import FDADataset
 from utils_physics import denormalize_labels
 
@@ -355,26 +355,49 @@ def evaluate_cvnn(model_path, SNR_dB_list, num_samples=1000, batch_size=64,
         num_samples: 每个SNR的测试样本数
         batch_size: 批次大小
         device: 设备
-        model_type: 模型类型
+        model_type: 模型类型（已弃用，改用智能检测）
 
     返回:
         results: 评测结果字典
     """
-    # 加载模型
-    if model_type == 'light':
-        model = FDA_CVNN_Light().to(device)
-    else:
-        model = FDA_CVNN().to(device)
-
+    # 智能加载模型（参考 benchmark.py 的 load_cvnn_model）
     if model_path and os.path.exists(model_path):
-        checkpoint = torch.load(model_path, map_location=device)
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
+
+        # 特征检测：判断模型类型
+        keys = list(state_dict.keys())
+
+        # Dual 注意力特征：包含 global_attn 或 local_attn
+        has_dual = any('global_attn' in k or 'local_attn' in k for k in keys)
+
+        # FAR 注意力特征：包含 conv_rr (但不是dual的一部分)
+        has_far = any('attn' in k and 'conv_rr' in k for k in keys) and not has_dual
+
+        # SE 注意力特征：包含 .fc. (但不是dual的一部分)
+        has_se = any('attn' in k and '.fc.' in k for k in keys) and not has_dual
+
+        # 根据检测结果实例化对应模型
+        if has_dual:
+            model = FDA_CVNN_Attention(attention_type='dual').to(device)
+            print(f"✓ 检测到模型类型: FDA_CVNN_Attention(dual)")
+        elif has_far:
+            model = FDA_CVNN_Attention(attention_type='far').to(device)
+            print(f"✓ 检测到模型类型: FDA_CVNN_Attention(far)")
+        elif has_se:
+            model = FDA_CVNN_Attention(attention_type='se').to(device)
+            print(f"✓ 检测到模型类型: FDA_CVNN_Attention(se)")
         else:
-            model.load_state_dict(checkpoint)
-        print(f"已加载模型: {model_path}")
+            model = FDA_CVNN().to(device)
+            print(f"✓ 检测到模型类型: FDA_CVNN(standard)")
+
+        # 移除 module. 前缀（多GPU训练的产物）
+        new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(new_state_dict, strict=False)
+        print(f"✓ 已加载模型: {model_path}")
     else:
-        print(f"警告: 模型文件不存在 {model_path}，使用随机初始化权重")
+        print(f"⚠ 警告: 模型文件不存在 {model_path}，使用随机初始化权重")
+        model = FDA_CVNN().to(device)
 
     model.eval()
 
@@ -499,14 +522,14 @@ def plot_comparison(all_results, crlb_results, save_path='results'):
     plt.savefig(f'{save_path}/range_comparison.pdf')
     print(f"已保存距离对比图: {save_path}/range_comparison.png")
 
-    # 计算时间对比
+    # 计算时间对比（柱状图）
     plt.figure(figsize=(10, 6))
     algorithms = [r['algorithm'] for r in all_results]
     avg_times = [np.mean(r['avg_time']) * 1000 for r in all_results]  # 转为毫秒
 
-    bars = plt.bar(algorithms, avg_times, color=colors[:len(algorithms)])
+    bars = plt.bar(algorithms, avg_times, color=colors[:len(algorithms)], alpha=0.7, edgecolor='black')
     plt.ylabel('Average Time (ms)', fontsize=14)
-    plt.title('Computational Time Comparison', fontsize=16)
+    plt.title('Computational Time Comparison (Average)', fontsize=16)
     plt.yscale('log')
     plt.grid(True, axis='y', alpha=0.3)
 
@@ -518,9 +541,30 @@ def plot_comparison(all_results, crlb_results, save_path='results'):
                 ha='center', va='bottom', fontsize=10)
 
     plt.tight_layout()
-    plt.savefig(f'{save_path}/time_comparison.png', dpi=300)
-    plt.savefig(f'{save_path}/time_comparison.pdf')
-    print(f"已保存时间对比图: {save_path}/time_comparison.png")
+    plt.savefig(f'{save_path}/time_comparison_bar.png', dpi=300)
+    plt.savefig(f'{save_path}/time_comparison_bar.pdf')
+    print(f"已保存时间对比柱状图: {save_path}/time_comparison_bar.png")
+
+    # 计算时间随SNR变化（曲线图）
+    plt.figure(figsize=(10, 6))
+    for idx, result in enumerate(all_results):
+        snr_list = result['snr_db_list']
+        time_list = [t * 1000 for t in result['avg_time']]  # 转为毫秒
+        label = result['algorithm']
+        plt.semilogy(snr_list, time_list,
+                    color=colors[idx % len(colors)],
+                    marker=markers[idx % len(markers)],
+                    linewidth=2, markersize=8, label=label)
+
+    plt.xlabel('SNR (dB)', fontsize=14)
+    plt.ylabel('Computational Time (ms)', fontsize=14)
+    plt.title('Computational Time vs SNR', fontsize=16)
+    plt.grid(True, which='both', alpha=0.3)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.savefig(f'{save_path}/time_vs_snr.png', dpi=300)
+    plt.savefig(f'{save_path}/time_vs_snr.pdf')
+    print(f"已保存时间随SNR变化图: {save_path}/time_vs_snr.png")
 
     plt.show()
 
@@ -580,6 +624,19 @@ def main():
         'crlb_r': crlb_r_list
     }
 
+    # ========== 评测 CVNN（优先评测，快速验证模型加载） ==========
+    print("\n" + "=" * 60)
+    print("评测 CVNN 模型...")
+    print("=" * 60)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"使用设备: {device}")
+
+    cvnn_results = evaluate_cvnn(
+        model_path, SNR_dB_list, num_samples_cvnn,
+        batch_size=64, device=device, model_type='standard'
+    )
+
     # ========== 评测传统算法 ==========
     print("\n" + "=" * 60)
     print("评测传统算法...")
@@ -611,19 +668,8 @@ def main():
     )
     classical_results.append(omp_results)
 
-    # ========== 评测 CVNN ==========
-    print("\n" + "=" * 60)
-    print("评测 CVNN 模型...")
-    print("=" * 60)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    cvnn_results = evaluate_cvnn(
-        model_path, SNR_dB_list, num_samples_cvnn,
-        batch_size=64, device=device, model_type='standard'
-    )
-
     # ========== 合并结果 ==========
-    all_results = classical_results + [cvnn_results]
+    all_results = [cvnn_results] + classical_results
 
     # ========== 保存结果 ==========
     print("\n" + "=" * 60)
