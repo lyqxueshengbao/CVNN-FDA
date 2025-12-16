@@ -345,7 +345,7 @@ def evaluate_classical_algorithm(algorithm_name, algorithm_func, params,
 
 # ==================== CVNN 评测 ====================
 def evaluate_cvnn(model_path, SNR_dB_list, num_samples=1000, batch_size=64,
-                  device='cuda', model_type='standard'):
+                  device='cuda', attention_type='dual', reduction=8, auto_detect=False):
     """
     评测 CVNN 模型在多个SNR下的性能
 
@@ -355,41 +355,53 @@ def evaluate_cvnn(model_path, SNR_dB_list, num_samples=1000, batch_size=64,
         num_samples: 每个SNR的测试样本数
         batch_size: 批次大小
         device: 设备
-        model_type: 模型类型（已弃用，改用智能检测）
+        attention_type: 注意力类型 ('dual', 'se', 'far', 'standard')
+        reduction: 注意力模块的压缩比 (4, 8, 16等)
+        auto_detect: 是否自动检测模型类型（默认False，使用手动指定）
 
     返回:
         results: 评测结果字典
     """
-    # 智能加载模型（参考 benchmark.py 的 load_cvnn_model）
     if model_path and os.path.exists(model_path):
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
 
-        # 特征检测：判断模型类型
-        keys = list(state_dict.keys())
+        if auto_detect:
+            # 自动检测模型类型（可能不准确）
+            keys = list(state_dict.keys())
+            has_dual = any('global_attn' in k or 'local_attn' in k for k in keys)
+            has_far = any('attn' in k and 'conv_rr' in k for k in keys) and not has_dual
+            has_se = any('attn' in k and '.fc.' in k for k in keys) and not has_dual
 
-        # Dual 注意力特征：包含 global_attn 或 local_attn
-        has_dual = any('global_attn' in k or 'local_attn' in k for k in keys)
+            if has_dual:
+                attention_type = 'dual'
+            elif has_far:
+                attention_type = 'far'
+            elif has_se:
+                attention_type = 'se'
+            else:
+                attention_type = 'standard'
 
-        # FAR 注意力特征：包含 conv_rr (但不是dual的一部分)
-        has_far = any('attn' in k and 'conv_rr' in k for k in keys) and not has_dual
+            # 尝试从权重形状推断reduction
+            for key in keys:
+                if 'attn1.fc.0.weight' in key or 'attn1.global_attn.fc.0.weight' in key:
+                    weight_shape = state_dict[key].shape
+                    reduction = 32 // weight_shape[0]  # 32是通道数
+                    break
 
-        # SE 注意力特征：包含 .fc. (但不是dual的一部分)
-        has_se = any('attn' in k and '.fc.' in k for k in keys) and not has_dual
-
-        # 根据检测结果实例化对应模型
-        if has_dual:
-            model = FDA_CVNN_Attention(attention_type='dual').to(device)
-            print(f"✓ 检测到模型类型: FDA_CVNN_Attention(dual)")
-        elif has_far:
-            model = FDA_CVNN_Attention(attention_type='far').to(device)
-            print(f"✓ 检测到模型类型: FDA_CVNN_Attention(far)")
-        elif has_se:
-            model = FDA_CVNN_Attention(attention_type='se').to(device)
-            print(f"✓ 检测到模型类型: FDA_CVNN_Attention(se)")
+        # 根据指定的参数实例化模型
+        if attention_type == 'dual':
+            model = FDA_CVNN_Attention(attention_type='dual', se_reduction=reduction).to(device)
+            print(f"✓ 使用模型: FDA_CVNN_Attention(dual, reduction={reduction})")
+        elif attention_type == 'far':
+            model = FDA_CVNN_Attention(attention_type='far', se_reduction=reduction).to(device)
+            print(f"✓ 使用模型: FDA_CVNN_Attention(far, reduction={reduction})")
+        elif attention_type == 'se':
+            model = FDA_CVNN_Attention(attention_type='se', se_reduction=reduction).to(device)
+            print(f"✓ 使用模型: FDA_CVNN_Attention(se, reduction={reduction})")
         else:
             model = FDA_CVNN().to(device)
-            print(f"✓ 检测到模型类型: FDA_CVNN(standard)")
+            print(f"✓ 使用模型: FDA_CVNN(standard)")
 
         # 移除 module. 前缀（多GPU训练的产物）
         new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
@@ -571,8 +583,12 @@ def plot_comparison(all_results, crlb_results, save_path='results'):
 
 # ==================== 主函数 ====================
 def main():
-    # ========== 参数设置 ==========
-    # 物理参数 (与 config.py 保持一致)
+    # ========== CVNN 模型配置（根据实际训练参数修改） ==========
+    CVNN_ATTENTION_TYPE = 'dual'  # 模型注意力类型: 'dual', 'se', 'far', 'standard'
+    CVNN_REDUCTION = 8            # 注意力模块压缩比: 4, 8, 16等
+    CVNN_AUTO_DETECT = False      # 是否自动检测模型类型（推荐False，手动指定更准确）
+
+    # ========== 物理参数 (与 config.py 保持一致) ==========
     M = cfg.M
     N = cfg.N
     f0 = cfg.f0
@@ -632,9 +648,13 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
 
+    # 手动指定模型配置（服务器上运行时确保正确）
     cvnn_results = evaluate_cvnn(
         model_path, SNR_dB_list, num_samples_cvnn,
-        batch_size=64, device=device, model_type='standard'
+        batch_size=64, device=device,
+        attention_type=CVNN_ATTENTION_TYPE,
+        reduction=CVNN_REDUCTION,
+        auto_detect=CVNN_AUTO_DETECT
     )
 
     # ========== 评测传统算法 ==========
