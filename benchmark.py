@@ -328,9 +328,8 @@ def capon_2d(R, r_search, theta_search):
     A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
 
     # 计算Capon谱: P = 1 / (a^H R^{-1} a)
-    # 对每个导向矢量计算: spectrum[i] = 1 / (A[:, i]^H @ R_inv @ A[:, i])
-    temp = R_inv @ A  # (MN, N_grid)
-    spectrum = 1.0 / (np.sum(A.conj() * temp, axis=0).real + 1e-12)
+    numerator = A.conj().T @ R_inv @ A  # (N_grid, N_grid) 对角线
+    spectrum = 1.0 / (np.abs(np.diag(numerator)) + 1e-12)
 
     # 找到最大值
     idx = np.argmax(spectrum)
@@ -376,9 +375,7 @@ def beamforming_2d(R, r_search, theta_search):
     A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
 
     # 计算波束形成谱: P = a^H R a
-    # 对每个导向矢量计算: spectrum[i] = A[:, i]^H @ R @ A[:, i]
-    temp = R @ A  # (MN, N_grid)
-    spectrum = np.abs(np.sum(A.conj() * temp, axis=0))
+    spectrum = np.abs(np.diag(A.conj().T @ R @ A))
 
     # 找到最大值
     idx = np.argmax(spectrum)
@@ -834,7 +831,7 @@ def plot_results(snr_list, results, L_snapshots=None):
         max_t = max([np.mean(results[k]["rmse_theta"]) for k in methods])
         max_time = max([np.mean(results[k]["time"]) for k in methods])
         metrics[m] = [1-rmse_r/max_r, 1-rmse_theta/max_t, 1-time_v/max_time]
-    
+
     angles = np.linspace(0, 2*np.pi, 3, endpoint=False).tolist() + [0]
     for m in methods:
         vals = metrics[m] + [metrics[m][0]]
@@ -875,7 +872,7 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     if L_list is None: L_list = [1, 5, 10, 25, 50, 100]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*70}\n📊 快拍数对比实验 (SNR={snr_db}dB)\n{'='*70}")
-    
+
     methods = ["MUSIC", "ESPRIT", "CVNN", "CRB"]
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
 
@@ -887,13 +884,13 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
     step_r = res_r / 2
     step_theta = res_theta / 2
-    
+
     num_r_points = max(int(cfg.r_max / step_r) + 1, 50)
     num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / step_theta) + 1, 30)
-    
+
     r_grid = np.linspace(0, cfg.r_max, num_r_points)
     theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
-    
+
     print(f"📐 动态网格: {len(r_grid)}×{len(theta_grid)} 点")
 
     cvnn = load_cvnn_model(device, L_snapshots=(None if use_random_model else L_list[0]), use_random_model=use_random_model)
@@ -917,9 +914,9 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
             R = generate_covariance_matrix(r_true, theta_true, snr_db)
             R_complex = R[0] + 1j * R[1]
             R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device)
-            
+
             sample_data = {"r_true": r_true, "theta_true": theta_true}
-            
+
             t0 = time.time()
             pred = cvnn(R_tensor).cpu().detach().numpy()[0]
             r_est_cvnn = pred[0]*cfg.r_max
@@ -927,29 +924,29 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
             errors["CVNN"]["r"].append((r_est_cvnn - r_true)**2)
             errors["CVNN"]["time"].append(time.time()-t0)
             sample_data["CVNN"] = (r_est_cvnn, th_est_cvnn)
-            
+
             t0 = time.time()
             r_est_music, th_est_music = music_2d_refined(R_complex, r_grid, theta_grid)
             errors["MUSIC"]["r"].append((r_est_music - r_true)**2)
             errors["MUSIC"]["time"].append(time.time()-t0)
             sample_data["MUSIC"] = (r_est_music, th_est_music)
-            
+
             t0 = time.time()
             r_est_esprit, th_est_esprit = esprit_2d_robust(R_complex, cfg.M, cfg.N)
             errors["ESPRIT"]["r"].append((r_est_esprit - r_true)**2)
             errors["ESPRIT"]["time"].append(time.time()-t0)
             sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
-            
+
             sample_results.append(sample_data)
 
         for m in methods:
             if m != "CRB":
                 results[m]["rmse_r"].append(np.sqrt(np.mean(errors[m]["r"])))
                 results[m]["time"].append(np.mean(errors[m]["time"]))
-        
+
         crb_r, _ = compute_crb_average(snr_db, L=L, num_samples=200)
         results["CRB"]["rmse_r"].append(crb_r)
-        
+
         # 输出统计结果
         print(f"\n📊 L={L} 各算法性能统计:")
         print(f"{'Method':<12} {'RMSE_r (m)':<12} {'Time (ms)':<12}")
@@ -958,7 +955,7 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
             if m != "CRB":
                 print(f"{m:<12} {results[m]['rmse_r'][-1]:<12.4f} {results[m]['time'][-1]*1000:<12.4f}")
         print(f"{'CRB':<12} {results['CRB']['rmse_r'][-1]:<12.4f} {'N/A':<12}")
-        
+
         # 输出前5个样本的详细估计结果
         print(f"\n📋 前5个样本的估计结果示例:")
         # 动态构建表头
