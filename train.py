@@ -183,9 +183,21 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     else:
         L_str = str(L)
         save_suffix = f"L{L}"
-    
-    # 动态生成保存路径：包含模型类型和快拍数
-    # 格式: checkpoints/fda_cvnn_{model_type}_L{snapshots}_best.pth
+
+    # 添加 SNR 后缀
+    snr_min, snr_max = snr_train_range
+    if snr_min == snr_max:
+        # 单个 SNR 值
+        snr_str = f"SNR{snr_min}" if snr_min >= 0 else f"SNRm{abs(snr_min)}"
+        save_suffix += f"_{snr_str}"
+    else:
+        # SNR 范围（负数用 m 表示）
+        snr_min_str = f"{snr_min}" if snr_min >= 0 else f"m{abs(snr_min)}"
+        snr_max_str = f"{snr_max}" if snr_max >= 0 else f"m{abs(snr_max)}"
+        save_suffix += f"_SNR{snr_min_str}to{snr_max_str}"
+
+    # 动态生成保存路径：包含模型类型、快拍数和 SNR
+    # 格式: checkpoints/fda_cvnn_{model_type}_L{snapshots}_SNR{snr}_best.pth
     if model_type == 'standard':
         save_name = f"fda_cvnn_{save_suffix}_best.pth"
     else:
@@ -324,8 +336,8 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     print(f"保存位置: {save_path}")
     print("=" * 60)
     
-    # 保存训练历史 (包含模型类型和快拍数)
-    history_filename = f"training_history_{model_type}_L{L}.json"
+    # 保存训练历史 (包含模型类型、快拍数和 SNR)
+    history_filename = f"training_history_{model_type}_{save_suffix}.json"
     history_path = os.path.join(cfg.checkpoint_dir, history_filename)
     # 转换为Python原生类型
     history_serializable = {k: [float(v) for v in vals] for k, vals in history.items()}
