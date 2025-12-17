@@ -168,7 +168,9 @@ def main():
     parser.add_argument('--se_reduction', type=int, default=4, help='注意力压缩比')
     parser.add_argument('--deep_only', action='store_true', help='只在深层使用注意力')
     parser.add_argument('--snapshots', type=int, default=None, help='快拍数 L')
-    parser.add_argument('--snr', type=int, default=0, help='固定信噪比')
+    parser.add_argument('--snr', type=int, default=None, help='固定信噪比 (单值训练)')
+    parser.add_argument('--snr-min', type=int, default=None, help='训练 SNR 最小值')
+    parser.add_argument('--snr-max', type=int, default=None, help='训练 SNR 最大值')
     parser.add_argument('--snapshots-benchmark', action='store_true', help='运行快拍数对比实验')
     parser.add_argument('--random-snapshots', action='store_true', help='随机化快拍数')
     parser.add_argument('--use-random-model', action='store_true', help='使用 Lrandom 通用模型')
@@ -218,6 +220,21 @@ def main():
 
     elif args.train:
         from train import train
+
+        # 处理 SNR 参数
+        snr_range = None
+        if args.snr is not None:
+            # 单个 SNR 值训练
+            snr_range = (args.snr, args.snr)
+            print(f"使用固定 SNR = {args.snr} dB 训练")
+        elif args.snr_min is not None and args.snr_max is not None:
+            # SNR 范围训练
+            snr_range = (args.snr_min, args.snr_max)
+            print(f"使用 SNR 范围 [{args.snr_min}, {args.snr_max}] dB 训练")
+        elif args.snr_min is not None or args.snr_max is not None:
+            print("❌ 错误: --snr-min 和 --snr-max 必须同时指定")
+            sys.exit(1)
+
         train(
             model_type=args.model,
             epochs=args.epochs,
@@ -227,7 +244,8 @@ def main():
             se_reduction=args.se_reduction,
             deep_only=args.deep_only,
             snapshots=args.snapshots,
-            random_snapshots=args.random_snapshots
+            random_snapshots=args.random_snapshots,
+            snr_train_range=snr_range
         )
 
     elif args.benchmark:

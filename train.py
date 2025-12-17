@@ -177,7 +177,7 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     # 快拍数随机化范围
     L_range = None
     if random_snapshots:
-        L_range = (1, 100)  # 训练时快拍数从 1 到 100 随机
+        L_range = (1, 36)  # 训练时快拍数从 1 到 100 随机
         L_str = f"random({L_range[0]}-{L_range[1]})"
         save_suffix = "Lrandom"
     else:
