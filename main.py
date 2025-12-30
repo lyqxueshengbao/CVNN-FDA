@@ -167,27 +167,18 @@ def main():
                         help='模型类型')
     parser.add_argument('--se_reduction', type=int, default=4, help='注意力压缩比')
     parser.add_argument('--deep_only', action='store_true', help='只在深层使用注意力')
+    parser.add_argument('--loss', type=str, default='l1', choices=['l1', 'l2', 'complex'],
+                        help='损失函数类型: l1 (MAE), l2 (欧氏距离), complex (极坐标复数距离)')
     parser.add_argument('--snapshots', type=int, default=None, help='快拍数 L')
-    parser.add_argument('--snr', type=int, default=None, help='固定信噪比 (单值训练)')
-    parser.add_argument('--snr-min', type=int, default=None, help='训练 SNR 最小值')
-    parser.add_argument('--snr-max', type=int, default=None, help='训练 SNR 最大值')
+    parser.add_argument('--snr', type=int, default=0, help='固定信噪比')
     parser.add_argument('--snapshots-benchmark', action='store_true', help='运行快拍数对比实验')
     parser.add_argument('--random-snapshots', action='store_true', help='随机化快拍数')
     parser.add_argument('--use-random-model', action='store_true', help='使用 Lrandom 通用模型')
     parser.add_argument('--num-samples', type=int, default=500, help='评测样本数')
     parser.add_argument('--fast', action='store_true', help='快速模式 (只测NN)')
     parser.add_argument('--tradeoff', action='store_true', help='运行精度-速度权衡分析')
-    parser.add_argument('--benchmark-legacy', action='store_true',
+    parser.add_argument('--benchmark-legacy', action='store_true', 
                         help='运行 Legacy Methods vs CVNN 对比实验 (复现 Matlab 传统算法)')
-    parser.add_argument('--comprehensive-benchmark', action='store_true',
-                        help='运行综合对比实验 (CVNN + MUSIC + ESPRIT + OMP + CRLB)')
-    parser.add_argument('--attention-type', type=str, default='dual',
-                        choices=['dual', 'se', 'far', 'standard'],
-                        help='CVNN注意力类型 (用于comprehensive-benchmark)')
-    parser.add_argument('--reduction', type=int, default=8,
-                        help='注意力模块压缩比 (用于comprehensive-benchmark)')
-    parser.add_argument('--monte-carlo', type=int, default=100,
-                        help='传统算法蒙特卡洛次数 (用于comprehensive-benchmark)')
 
     # 保留此参数以兼容旧脚本，但在代码中会将其拦截
     parser.add_argument('--music-continuous', action='store_true',
@@ -220,21 +211,6 @@ def main():
 
     elif args.train:
         from train import train
-
-        # 处理 SNR 参数
-        snr_range = None
-        if args.snr is not None:
-            # 单个 SNR 值训练
-            snr_range = (args.snr, args.snr)
-            print(f"使用固定 SNR = {args.snr} dB 训练")
-        elif args.snr_min is not None and args.snr_max is not None:
-            # SNR 范围训练
-            snr_range = (args.snr_min, args.snr_max)
-            print(f"使用 SNR 范围 [{args.snr_min}, {args.snr_max}] dB 训练")
-        elif args.snr_min is not None or args.snr_max is not None:
-            print("❌ 错误: --snr-min 和 --snr-max 必须同时指定")
-            sys.exit(1)
-
         train(
             model_type=args.model,
             epochs=args.epochs,
@@ -245,7 +221,7 @@ def main():
             deep_only=args.deep_only,
             snapshots=args.snapshots,
             random_snapshots=args.random_snapshots,
-            snr_train_range=snr_range
+            loss_type=args.loss
         )
 
     elif args.benchmark:
@@ -318,39 +294,12 @@ def main():
         except ImportError:
             print("❌ 未找到 benchmark_legacy_vs_cvnn.py 模块。")
             sys.exit(1)
-
+        
         snr_list, results, L = run_legacy_benchmark(
             num_samples=args.num_samples,
             L_snapshots=args.snapshots
         )
         plot_results(snr_list, results, L_snapshots=L)
-
-    elif args.comprehensive_benchmark:
-        # 运行综合对比实验 (CVNN + MUSIC + ESPRIT + OMP + CRLB)
-        print("\n" + "=" * 60)
-        print("运行综合对比实验")
-        print("=" * 60)
-        print(f"快拍数: L = {args.snapshots if args.snapshots else cfg.L_snapshots}")
-        print(f"测试样本数: {args.num_samples}")
-        print(f"蒙特卡洛次数: {args.monte_carlo}")
-        print(f"CVNN 注意力类型: {args.attention_type}")
-        print(f"CVNN 压缩比: {args.reduction}")
-        print("=" * 60)
-
-        try:
-            import benchmark_comprehensive as bc
-        except ImportError:
-            print("❌ 未找到 benchmark_comprehensive.py 模块。")
-            sys.exit(1)
-
-        # 调用综合评测（使用命令行参数）
-        bc.run_comprehensive_benchmark(
-            L_snapshots=args.snapshots,
-            num_samples_cvnn=args.num_samples,
-            monte_carlo_classical=args.monte_carlo,
-            attention_type=args.attention_type,
-            reduction=args.reduction
-        )
 
 if __name__ == "__main__":
     main()

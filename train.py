@@ -18,25 +18,60 @@ from utils_physics import denormalize_labels
 class RangeAngleLoss(nn.Module):
     """
     距离-角度联合损失函数
-    使用 L1Loss 对小误差更敏感，突破 MSE 的梯度消失问题
+    
+    支持多种损失计算方式:
+    - 'l1': L1Loss 分别计算距离和角度误差后加权求和 (默认)
+    - 'l2': L2 欧氏距离，把 (r, θ) 看作二维点
+    - 'complex': 复数欧氏距离，把 (r, θ) 转为极坐标复数 z = r * exp(jθ)
     """
-    def __init__(self, lambda_angle: float = 1.0, range_weight: float = 2.0):
+    def __init__(self, lambda_angle: float = 1.0, range_weight: float = 2.0, 
+                 loss_type: str = 'l1'):
         super().__init__()
         self.lambda_angle = lambda_angle
         self.range_weight = range_weight
-        # 使用 L1Loss (MAE)，对小误差保持较大梯度
+        self.loss_type = loss_type
+        
+        # L1 损失基准
         self.criterion = nn.L1Loss()
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         r_pred, theta_pred = pred[:, 0], pred[:, 1]
         r_target, theta_target = target[:, 0], target[:, 1]
         
-        loss_r = self.criterion(r_pred, r_target)
-        loss_theta = self.criterion(theta_pred, theta_target)
+        if self.loss_type == 'l2':
+            # L2 欧氏距离: sqrt((r_pred - r_true)^2 + (theta_pred - theta_true)^2)
+            # 加权版本
+            r_diff = self.range_weight * (r_pred - r_target)
+            theta_diff = self.lambda_angle * (theta_pred - theta_target)
+            loss = torch.sqrt(r_diff**2 + theta_diff**2 + 1e-8).mean()
+            
+        elif self.loss_type == 'complex':
+            # 复数欧氏距离: |z_pred - z_true| where z = r * exp(j * theta)
+            # 注意: 输入是归一化值 [0,1]，需要转换到合理的角度范围
+            # theta 归一化到 [0,1] 对应实际角度范围，这里转为弧度 [-π/2, π/2] 近似
+            theta_pred_rad = (theta_pred - 0.5) * np.pi  # 映射到 [-π/2, π/2]
+            theta_target_rad = (theta_target - 0.5) * np.pi
+            
+            # 复数表示 (使用加权的 r)
+            r_pred_w = self.range_weight * r_pred
+            r_target_w = self.range_weight * r_target
+            
+            # z = r * exp(j*theta) = r*cos(theta) + j*r*sin(theta)
+            real_pred = r_pred_w * torch.cos(theta_pred_rad)
+            imag_pred = r_pred_w * torch.sin(theta_pred_rad)
+            real_target = r_target_w * torch.cos(theta_target_rad)
+            imag_target = r_target_w * torch.sin(theta_target_rad)
+            
+            # 复数欧氏距离: |z_pred - z_target|
+            loss = torch.sqrt((real_pred - real_target)**2 + 
+                              (imag_pred - imag_target)**2 + 1e-8).mean()
+        else:
+            # 默认 L1: 分别计算后加权求和
+            loss_r = self.criterion(r_pred, r_target)
+            loss_theta = self.criterion(theta_pred, theta_target)
+            loss = self.range_weight * loss_r + self.lambda_angle * loss_theta
         
-        # 距离比角度难学，给距离加权重
-        total_loss = self.range_weight * loss_r + self.lambda_angle * loss_theta
-        return total_loss
+        return loss
 
 
 def compute_metrics(preds, labels):
@@ -144,7 +179,8 @@ def validate(model, val_loader, criterion, device):
 
 def train(model_type='standard', epochs=None, lr=None, batch_size=None,
           train_samples=None, snr_train_range=None, save_best=True,
-          se_reduction=4, deep_only=False, snapshots=None, random_snapshots=False):
+          se_reduction=4, deep_only=False, snapshots=None, random_snapshots=False,
+          loss_type='l1'):
     """
     主训练函数
     
@@ -153,6 +189,7 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         epochs: 训练轮数
         lr: 学习率
         batch_size: 批次大小
+        loss_type: 损失函数类型 ('l1', 'l2', 'complex')
         train_samples: 训练样本数
         snr_train_range: 训练SNR范围
         save_best: 是否保存最佳模型
@@ -263,8 +300,9 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs, eta_min=1e-6
     )
-    # 使用 L1 损失函数，对小误差更敏感
-    criterion = RangeAngleLoss(lambda_angle=1.0, range_weight=2.0)
+    # 损失函数：支持 l1, l2, complex 三种类型
+    criterion = RangeAngleLoss(lambda_angle=1.0, range_weight=2.0, loss_type=loss_type)
+    print(f"损失函数类型: {loss_type}")
     
     # 训练历史
     history = {
@@ -367,6 +405,9 @@ if __name__ == "__main__":
                         help='Minimum training SNR')
     parser.add_argument('--snr_max', type=float, default=None,
                         help='Maximum training SNR')
+    parser.add_argument('--loss', type=str, default='l1',
+                        choices=['l1', 'l2', 'complex'],
+                        help='Loss type: l1 (MAE), l2 (Euclidean), complex (polar complex distance)')
     
     args = parser.parse_args()
     
@@ -380,5 +421,6 @@ if __name__ == "__main__":
         lr=args.lr,
         batch_size=args.batch_size,
         train_samples=args.train_samples,
-        snr_train_range=snr_range
+        snr_train_range=snr_range,
+        loss_type=args.loss
     )
