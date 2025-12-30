@@ -35,41 +35,31 @@ class RangeAngleLoss(nn.Module):
         self.criterion = nn.L1Loss()
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        r_pred, theta_pred = pred[:, 0], pred[:, 1]
-        r_target, theta_target = target[:, 0], target[:, 1]
-        
+        # 直接索引，避免创建额外视图
         if self.loss_type == 'l2':
-            # L2 欧氏距离: sqrt((r_pred - r_true)^2 + (theta_pred - theta_true)^2)
-            # 加权版本
-            r_diff = self.range_weight * (r_pred - r_target)
-            theta_diff = self.lambda_angle * (theta_pred - theta_target)
-            loss = torch.sqrt(r_diff**2 + theta_diff**2 + 1e-8).mean()
+            # L2 欧氏距离 (内存优化版本)
+            loss = torch.sqrt(
+                (self.range_weight * (pred[:, 0] - target[:, 0])).pow(2) +
+                (self.lambda_angle * (pred[:, 1] - target[:, 1])).pow(2) + 1e-8
+            ).mean()
             
         elif self.loss_type == 'complex':
-            # 复数欧氏距离: |z_pred - z_true| where z = r * exp(j * theta)
-            # 注意: 输入是归一化值 [0,1]，需要转换到合理的角度范围
-            # theta 归一化到 [0,1] 对应实际角度范围，这里转为弧度 [-π/2, π/2] 近似
-            theta_pred_rad = (theta_pred - 0.5) * np.pi  # 映射到 [-π/2, π/2]
-            theta_target_rad = (theta_target - 0.5) * np.pi
+            # 复数欧氏距离 (内存优化版本)
+            # theta 归一化 [0,1] -> 弧度 [-π/2, π/2]
+            theta_p = (pred[:, 1] - 0.5) * np.pi
+            theta_t = (target[:, 1] - 0.5) * np.pi
+            r_p = self.range_weight * pred[:, 0]
+            r_t = self.range_weight * target[:, 0]
             
-            # 复数表示 (使用加权的 r)
-            r_pred_w = self.range_weight * r_pred
-            r_target_w = self.range_weight * r_target
-            
-            # z = r * exp(j*theta) = r*cos(theta) + j*r*sin(theta)
-            real_pred = r_pred_w * torch.cos(theta_pred_rad)
-            imag_pred = r_pred_w * torch.sin(theta_pred_rad)
-            real_target = r_target_w * torch.cos(theta_target_rad)
-            imag_target = r_target_w * torch.sin(theta_target_rad)
-            
-            # 复数欧氏距离: |z_pred - z_target|
-            loss = torch.sqrt((real_pred - real_target)**2 + 
-                              (imag_pred - imag_target)**2 + 1e-8).mean()
+            # |z_pred - z_target| = sqrt((r_p*cos(θ_p) - r_t*cos(θ_t))^2 + (r_p*sin(θ_p) - r_t*sin(θ_t))^2)
+            loss = torch.sqrt(
+                (r_p * torch.cos(theta_p) - r_t * torch.cos(theta_t)).pow(2) +
+                (r_p * torch.sin(theta_p) - r_t * torch.sin(theta_t)).pow(2) + 1e-8
+            ).mean()
         else:
-            # 默认 L1: 分别计算后加权求和
-            loss_r = self.criterion(r_pred, r_target)
-            loss_theta = self.criterion(theta_pred, theta_target)
-            loss = self.range_weight * loss_r + self.lambda_angle * loss_theta
+            # 默认 L1
+            loss = (self.range_weight * torch.abs(pred[:, 0] - target[:, 0]) +
+                    self.lambda_angle * torch.abs(pred[:, 1] - target[:, 1])).mean()
         
         return loss
 
@@ -233,12 +223,19 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         snr_max_str = f"{snr_max}" if snr_max >= 0 else f"m{abs(snr_max)}"
         save_suffix += f"_SNR{snr_min_str}to{snr_max_str}"
 
-    # 动态生成保存路径：包含模型类型、快拍数和 SNR
-    # 格式: checkpoints/fda_cvnn_{model_type}_L{snapshots}_SNR{snr}_best.pth
+    # 动态生成保存路径：包含模型类型、快拍数、SNR 和损失类型
+    # 格式: checkpoints/fda_cvnn_{model_type}_{loss_type}_L{snapshots}_SNR{snr}_best.pth
+    loss_tag = loss_type if loss_type != 'l1' else None  # l1为默认可省略
     if model_type == 'standard':
-        save_name = f"fda_cvnn_{save_suffix}_best.pth"
+        if loss_tag:
+            save_name = f"fda_cvnn_{loss_tag}_{save_suffix}_best.pth"
+        else:
+            save_name = f"fda_cvnn_{save_suffix}_best.pth"
     else:
-        save_name = f"fda_cvnn_{model_type}_{save_suffix}_best.pth"
+        if loss_tag:
+            save_name = f"fda_cvnn_{model_type}_{loss_tag}_{save_suffix}_best.pth"
+        else:
+            save_name = f"fda_cvnn_{model_type}_{save_suffix}_best.pth"
     save_path = os.path.join(cfg.checkpoint_dir, save_name)
     
     print("=" * 60)
