@@ -489,7 +489,8 @@ def train_snr_specific(
             best_rmse_r = metric_for_best
             best_val_loss = val_loss
             saved_best = True
-            save_path = f'checkpoints/{model_name}_L{cfg.L_snapshots}_best.pth'
+            df_khz = int(round(float(cfg.delta_f) / 1e3))
+            save_path = f'checkpoints/{model_name}_L{cfg.L_snapshots}_df{df_khz}k_best.pth'
             torch.save({
                 'epoch': epoch,
                 'snr_range': (snr_min, snr_max),
@@ -498,6 +499,7 @@ def train_snr_specific(
                 'low_snr_weight': float(low_snr_weight),
                 'low_snr_prob': float(low_snr_prob),
                 'low_snr_split': float(low_snr_split) if low_snr_split is not None else None,
+                'delta_f': float(cfg.delta_f),
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),  # 保存优化器状态，支持断点续训
                 'val_loss': val_loss,
@@ -519,7 +521,8 @@ def train_snr_specific(
                 )
     
     print(f"\n训练完成! best_metric(RMSE_r or focus_rmse_r) = {best_rmse_r:.2f}m")
-    print(f"模型保存至: checkpoints/{model_name}_L{cfg.L_snapshots}_best.pth")
+    df_khz = int(round(float(cfg.delta_f) / 1e3))
+    print(f"模型保存至: checkpoints/{model_name}_L{cfg.L_snapshots}_df{df_khz}k_best.pth")
     return best_rmse_r
 
 
@@ -610,6 +613,8 @@ if __name__ == "__main__":
     parser.add_argument('--samples', type=int, default=50000, help='训练样本数 (原 main.py: --samples)')
     parser.add_argument('--batch', type=int, default=64, help='批次大小 (原 main.py: --batch)')
     parser.add_argument('--lr', type=float, default=5e-4, help='学习率')
+    parser.add_argument('--delta_f', type=float, default=None,
+                        help='指定 delta_f (Hz)，用于数据生成/训练/评测，例如 30000 或 30e3')
     parser.add_argument('--loss', type=str, default='l1',
                         choices=['l1', 'l2', 'complex'],
                         help='loss: l1/l2/complex (与 train.py 一致)')
@@ -636,6 +641,12 @@ if __name__ == "__main__":
     parser.add_argument('--se_reduction', type=int, default=4, help='注意力压缩比')
     parser.add_argument('--deep_only', action='store_true', help='只在深层使用注意力')
     args = parser.parse_args()
+
+    if args.delta_f is not None:
+        cfg.delta_f = float(args.delta_f)
+        cfg.R_max = cfg.c / (2 * cfg.delta_f)
+        if cfg.R_max < cfg.r_max:
+            print(f"[WARNING] 物理模糊：R_max={cfg.R_max:.0f}m < r_max={cfg.r_max:.0f}m")
     
     cfg.L_snapshots = args.snapshots
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -724,11 +735,17 @@ if __name__ == "__main__":
         print("="*60)
         
         # 加载模型
-        low_path = f'checkpoints/cvnn_low_snr{model_suffix}_L{args.snapshots}_best.pth'
-        high_path = f'checkpoints/cvnn_high_snr{model_suffix}_L{args.snapshots}_best.pth'
+        df_khz = int(round(float(cfg.delta_f) / 1e3))
+        low_path = f'checkpoints/cvnn_low_snr{model_suffix}_L{args.snapshots}_df{df_khz}k_best.pth'
+        high_path = f'checkpoints/cvnn_high_snr{model_suffix}_L{args.snapshots}_df{df_khz}k_best.pth'
+        low_path_legacy = f'checkpoints/cvnn_low_snr{model_suffix}_L{args.snapshots}_best.pth'
+        high_path_legacy = f'checkpoints/cvnn_high_snr{model_suffix}_L{args.snapshots}_best.pth'
         
         models = {}
         
+        if not os.path.exists(low_path) and os.path.exists(low_path_legacy):
+            low_path = low_path_legacy
+
         if os.path.exists(low_path):
             model_low = ModelClass().to(device)
             ckpt = torch.load(low_path, map_location=device, weights_only=False)
@@ -738,6 +755,9 @@ if __name__ == "__main__":
         else:
             print(f"警告: {low_path} 不存在!")
         
+        if not os.path.exists(high_path) and os.path.exists(high_path_legacy):
+            high_path = high_path_legacy
+
         if os.path.exists(high_path):
             model_high = ModelClass().to(device)
             ckpt = torch.load(high_path, map_location=device, weights_only=False)
