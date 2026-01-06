@@ -223,6 +223,10 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         snr_max_str = f"{snr_max}" if snr_max >= 0 else f"m{abs(snr_max)}"
         save_suffix += f"_SNR{snr_min_str}to{snr_max_str}"
 
+    # 添加 delta_f 后缀（用于区分不同物理参数下训练的模型）
+    df_khz = int(round(float(cfg.delta_f) / 1e3))
+    save_suffix += f"_df{df_khz}k"
+
     # 动态生成保存路径：包含模型类型、快拍数、SNR 和损失类型
     # 格式: checkpoints/fda_cvnn_{model_type}_{loss_type}_L{snapshots}_SNR{snr}_best.pth
     loss_tag = loss_type if loss_type != 'l1' else None  # l1为默认可省略

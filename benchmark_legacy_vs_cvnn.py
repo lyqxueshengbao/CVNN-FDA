@@ -190,13 +190,13 @@ def find_best_model_path(L_snapshots=None):
     candidates = []
     
     # 优先匹配特定 L 的模型
-    pattern = f"{checkpoint_dir}/fda_cvnn_*_L{L}_best.pth"
+    pattern = f"{checkpoint_dir}/fda_cvnn_*_L{L}*_best.pth"
     if glob.glob(pattern): 
         candidates.extend(glob.glob(pattern))
     candidates.append(f"{checkpoint_dir}/fda_cvnn_L{L}_best.pth")
     
     # 通用模型
-    pattern_random = f"{checkpoint_dir}/fda_cvnn_*_Lrandom_best.pth"
+    pattern_random = f"{checkpoint_dir}/fda_cvnn_*_Lrandom*_best.pth"
     if glob.glob(pattern_random): 
         candidates.extend(glob.glob(pattern_random))
     candidates.append(f"{checkpoint_dir}/fda_cvnn_best.pth")

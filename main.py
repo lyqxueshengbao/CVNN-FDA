@@ -162,6 +162,8 @@ def main():
     parser.add_argument('--samples', type=int, default=50000, help='训练样本数')
     parser.add_argument('--batch', type=int, default=512, help='批次大小')
     parser.add_argument('--lr', type=float, default=5e-4, help='学习率')
+    parser.add_argument('--delta_f', type=float, default=None,
+                        help='指定 delta_f (Hz)，用于数据生成/训练/评测。例如 30000 或 30e3')
     parser.add_argument('--model', type=str, default='standard',
                         choices=['standard', 'light', 'attention', 'se', 'cbam', 'far', 'dual'],
                         help='模型类型')
@@ -185,6 +187,12 @@ def main():
                         help='(已弃用) 以前用于开启连续优化。现在为了凸显 CVNN 优势，该选项将被忽略，强制使用 Standard Baselines。')
 
     args = parser.parse_args()
+
+    if args.delta_f is not None:
+        cfg.delta_f = float(args.delta_f)
+        cfg.R_max = cfg.c / (2 * cfg.delta_f)
+        if cfg.R_max < cfg.r_max:
+            print(f"[WARNING] 物理模糊：R_max={cfg.R_max:.0f}m < r_max={cfg.r_max:.0f}m")
 
     print("=" * 60)
     print("FDA-MIMO CVNN 项目 (Standard Baselines Mode)")

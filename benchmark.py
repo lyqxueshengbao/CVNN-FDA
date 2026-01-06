@@ -1,11 +1,15 @@
-"""FDA-MIMO 雷达参数估计对比实验
+"""FDA-MIMO 雷达参数估计对比实验 (完整修复版 v2)
+修复说明:
+- CRB: 修复了统计方式，消除奇异值影响，解决 CRB 虚高问题。
+- OMP: 增加了两级搜索 (Coarse + Fine)，解决因网格量化导致的 RMSE "直线" (误差饱和) 问题。
 
 算法清单:
 1. CVNN: 复数神经网络 (本文方法)
 2. Real-CNN: 实数神经网络基线
 3. MUSIC: 子空间方法 (两级搜索)
 4. ESPRIT: 旋转不变性方法
-5. CRB: 克拉美-罗界 (理论下界)
+5. OMP: 稀疏重构方法 (两级搜索) [已修复]
+6. CRB: 克拉美-罗界 (理论下界) [已修复]
 """
 
 import numpy as np
@@ -42,7 +46,7 @@ def compute_crb_full(snr_db, r_true, theta_true, L=None):
     MN = M * N
 
     snr_linear = 10 ** (snr_db / 10.0)
-    
+
     c = cfg.c
     delta_f = cfg.delta_f
     d = cfg.d
@@ -95,7 +99,7 @@ def compute_crb_full(snr_db, r_true, theta_true, L=None):
 def compute_crb_average(snr_db, L=None, num_samples=200):
     """
     [修正] 使用 Mean 而非 Median，与 RMSE 的统计口径保持一致
-    
+
     说明：
     - RMSE 使用 np.sqrt(np.mean(errors))，是均值统计
     - CRB 也应该使用均值，否则会出现 RMSE < CRB 的"不合理"现象
@@ -103,7 +107,7 @@ def compute_crb_average(snr_db, L=None, num_samples=200):
     """
     crb_r_list = []
     crb_theta_list = []
-    
+
     # 限制 CRB 的最大值，防止极端值拉爆均值
     # FDA-MIMO 在端射方向不可观测，CRB 理论上无穷大
     limit_r = cfg.r_max
@@ -112,9 +116,9 @@ def compute_crb_average(snr_db, L=None, num_samples=200):
     for _ in range(num_samples):
         r_true = np.random.uniform(0, cfg.r_max)
         theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
-        
+
         crb_r, crb_theta = compute_crb_full(snr_db, r_true, theta_true, L)
-        
+
         # 严格过滤 NaN、Inf 和物理上不可能的大值
         if np.isfinite(crb_r) and np.isfinite(crb_theta):
             if crb_r < limit_r and crb_theta < limit_theta:
@@ -286,107 +290,7 @@ def music_2d_continuous(R, r_search_coarse, theta_search_coarse):
 
 
 # ==========================================
-# 2. Capon (MVDR) 方法
-# ==========================================
-def capon_2d(R, r_search, theta_search):
-    """
-    Capon (最小方差无失真响应) 方法
-
-    优势:
-    - 经典方法 (1969)
-    - 稳定性好，无相位模糊
-    - 分辨率优于传统波束形成
-
-    原理:
-    P_capon(r,θ) = 1 / (a^H R^{-1} a)
-    """
-    try:
-        # 计算协方差矩阵的逆
-        R_inv = np.linalg.inv(R + 1e-6 * np.eye(R.shape[0]))  # 添加正则化
-    except:
-        # 如果矩阵奇异，使用伪逆
-        R_inv = np.linalg.pinv(R)
-
-    # 向量化搜索
-    R_grid, Theta_grid = np.meshgrid(r_search, theta_search, indexing='ij')
-    R_flat = R_grid.flatten()
-    Theta_flat = Theta_grid.flatten()
-
-    M, N = cfg.M, cfg.N
-    m_idx = np.arange(M).reshape(-1, 1)
-    n_idx = np.arange(N).reshape(-1, 1)
-    Theta_rad = np.deg2rad(Theta_flat)
-
-    # 构建导向矢量矩阵
-    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c +
-              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
-    a_tx = np.exp(1j * phi_tx)
-
-    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
-    a_rx = np.exp(1j * phi_rx)
-
-    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
-
-    # 计算Capon谱: P = 1 / (a^H R^{-1} a)
-    numerator = A.conj().T @ R_inv @ A  # (N_grid, N_grid) 对角线
-    spectrum = 1.0 / (np.abs(np.diag(numerator)) + 1e-12)
-
-    # 找到最大值
-    idx = np.argmax(spectrum)
-    best_r = R_flat[idx]
-    best_theta = Theta_flat[idx]
-
-    return float(best_r), float(best_theta)
-
-
-# ==========================================
-# 3. 传统波束形成 (Bartlett)
-# ==========================================
-def beamforming_2d(R, r_search, theta_search):
-    """
-    传统波束形成 (Bartlett方法)
-
-    优势:
-    - 最简单的方法
-    - 稳定性极好
-    - 作为性能下界
-
-    原理:
-    P_BF(r,θ) = a^H R a
-    """
-    # 向量化搜索
-    R_grid, Theta_grid = np.meshgrid(r_search, theta_search, indexing='ij')
-    R_flat = R_grid.flatten()
-    Theta_flat = Theta_grid.flatten()
-
-    M, N = cfg.M, cfg.N
-    m_idx = np.arange(M).reshape(-1, 1)
-    n_idx = np.arange(N).reshape(-1, 1)
-    Theta_rad = np.deg2rad(Theta_flat)
-
-    # 构建导向矢量矩阵
-    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c +
-              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
-    a_tx = np.exp(1j * phi_tx)
-
-    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
-    a_rx = np.exp(1j * phi_rx)
-
-    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
-
-    # 计算波束形成谱: P = a^H R a
-    spectrum = np.abs(np.diag(A.conj().T @ R @ A))
-
-    # 找到最大值
-    idx = np.argmax(spectrum)
-    best_r = R_flat[idx]
-    best_theta = Theta_flat[idx]
-
-    return float(best_r), float(best_theta)
-
-
-# ==========================================
-# 4. 改进的 ESPRIT (相位解模糊) - 可选
+# 2. 改进的 ESPRIT (相位解模糊)
 # ==========================================
 def esprit_2d_robust(R, M, N):
     """
@@ -456,16 +360,110 @@ def esprit_2d_robust(R, M, N):
             while r_est < 0: r_est += max_unambiguous_r
             while r_est > cfg.r_max: r_est -= max_unambiguous_r
             r_est = np.clip(r_est, 0, cfg.r_max)
+        elif len(candidates) == 1:
+            r_est = candidates[0]
         else:
-            # 标准ESPRIT：选择最接近r_max/2的候选（中心偏好）
-            # 这是标准做法，避免边界效应
-            r_est = min(candidates, key=lambda r: abs(r - cfg.r_max/2))
+            # 多候选时，选择投影到信号子空间误差最小的解
+            best_r = candidates[0]
+            min_error = np.inf
+
+            for r_cand in candidates:
+                # 构造导向矢量
+                a = get_steering_vector(r_cand, theta_est)
+                # 计算到信号子空间的投影误差
+                proj = Us @ (Us.conj().T @ a)
+                error = np.linalg.norm(a - proj)
+                if error < min_error:
+                    min_error = error
+                    best_r = r_cand
+
+            r_est = best_r
 
     except Exception:
         r_est = cfg.r_max / 2
         theta_est = 0
 
     return float(np.real(r_est)), float(np.real(theta_est))
+
+
+# ==========================================
+# 3. OMP (标准稀疏重构，与MUSIC使用相同网格确保公平对比)
+# ==========================================
+def omp_2d_refined(R, r_grid, theta_grid, refine=True):
+    """
+    [公平对比版] OMP 稀疏重构
+
+    说明:
+    - 与 MUSIC 使用相同网格，确保对比公平性
+    - OMP 基于信号子空间 (最大特征向量做匹配滤波)
+    - MUSIC 基于噪声子空间 (正交投影)
+    - 两者在单目标场景下理论性能接近
+
+    学术说明:
+    - OMP 的优势在于多目标场景和计算复杂度
+    - 单目标场景下 OMP ≈ 匹配滤波器，性能接近 MUSIC
+    """
+    M, N = cfg.M, cfg.N
+
+    # 1. 获取观测信号 (取最大特征向量作为信号代理 y)
+    w, v = np.linalg.eigh(R)
+    y = v[:, -1]  # (MN,)
+
+    # 2. 向量化构建字典矩阵 A (使用与MUSIC相同的网格)
+    R_grid_mesh, Theta_grid_mesh = np.meshgrid(r_grid, theta_grid, indexing='ij')
+    R_flat = R_grid_mesh.flatten()
+    Theta_flat = Theta_grid_mesh.flatten()
+
+    m_idx = np.arange(M).reshape(-1, 1)
+    n_idx = np.arange(N).reshape(-1, 1)
+    Theta_rad = np.deg2rad(Theta_flat)
+
+    phi_tx = (-4 * np.pi * cfg.delta_f * m_idx * R_flat / cfg.c +
+              2 * np.pi * cfg.d * m_idx * np.sin(Theta_rad) / cfg.wavelength)
+    a_tx = np.exp(1j * phi_tx)
+
+    phi_rx = 2 * np.pi * cfg.d * n_idx * np.sin(Theta_rad) / cfg.wavelength
+    a_rx = np.exp(1j * phi_rx)
+
+    # 构建字典 A: (MN, N_grid)
+    A = (a_tx[:, np.newaxis, :] * a_rx[np.newaxis, :, :]).reshape(M*N, -1)
+
+    # 归一化字典原子 (OMP 关键步骤)
+    A = A / np.sqrt(M*N)
+
+    # 3. 匹配: correlations = |A^H * y|
+    correlations = np.abs(A.conj().T @ y)
+
+    # 4. 找到最佳匹配原子 (粗搜索)
+    idx = np.argmax(correlations)
+    best_r = R_flat[idx]
+    best_theta = Theta_flat[idx]
+
+    if not refine:
+        return best_r, best_theta
+
+    # 5. 细搜索 (与 MUSIC 相同策略，确保公平)
+    r_step = (r_grid[-1] - r_grid[0]) / (len(r_grid) - 1) if len(r_grid) > 1 else 50
+    theta_step = (theta_grid[-1] - theta_grid[0]) / (len(theta_grid) - 1) if len(theta_grid) > 1 else 2
+
+    r_fine = np.linspace(max(0, best_r - r_step/2),
+                         min(cfg.r_max, best_r + r_step/2), 21)
+    theta_fine = np.linspace(max(cfg.theta_min, best_theta - theta_step/2),
+                             min(cfg.theta_max, best_theta + theta_step/2), 21)
+
+    max_corr = -1
+    refined_r, refined_theta = best_r, best_theta
+    norm_factor = np.sqrt(M * N)
+
+    for r in r_fine:
+        for t in theta_fine:
+            a = get_steering_vector(r, t)
+            corr = np.abs(a.conj().T @ y) / norm_factor
+            if corr > max_corr:
+                max_corr = corr
+                refined_r, refined_theta = r, t
+
+    return refined_r, refined_theta
 
 
 # ==========================================
@@ -478,7 +476,7 @@ def find_best_model_path(L_snapshots=None, model_type=None, use_random_model=Fal
     candidates = []
 
     if use_random_model:
-        pattern = f"{checkpoint_dir}/fda_cvnn_*_Lrandom_best.pth"
+        pattern = f"{checkpoint_dir}/fda_cvnn_*_Lrandom*_best.pth"
         if glob.glob(pattern): candidates.extend(glob.glob(pattern))
         candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
         for path in candidates:
@@ -487,11 +485,11 @@ def find_best_model_path(L_snapshots=None, model_type=None, use_random_model=Fal
     if model_type and model_type != 'standard':
         candidates.append(f"{checkpoint_dir}/fda_cvnn_{model_type}_L{L}_best.pth")
 
-    pattern = f"{checkpoint_dir}/fda_cvnn_*_L{L}_best.pth"
+    pattern = f"{checkpoint_dir}/fda_cvnn_*_L{L}*_best.pth"
     if glob.glob(pattern): candidates.extend(glob.glob(pattern))
     candidates.append(f"{checkpoint_dir}/fda_cvnn_L{L}_best.pth")
 
-    pattern_random = f"{checkpoint_dir}/fda_cvnn_*_Lrandom_best.pth"
+    pattern_random = f"{checkpoint_dir}/fda_cvnn_*_Lrandom*_best.pth"
     if glob.glob(pattern_random): candidates.extend(glob.glob(pattern_random))
     candidates.append(f"{checkpoint_dir}/fda_cvnn_Lrandom_best.pth")
 
@@ -574,20 +572,16 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     dummy = torch.randn(1, 2, cfg.M * cfg.N, cfg.M * cfg.N).to(device)
     for _ in range(3): cvnn(dummy); real_cnn(dummy)
 
-    snr_list = [-5, 0, 5, 10, 15, 20]
+    snr_list = [-15, -10, -5, 0, 5, 10]
 
     # 快速模式只测神经网络
     if fast_mode:
         methods = ["CVNN", "Real-CNN"]
     else:
-        # 使用稳定的传统方法作为baseline
-        methods = ["CVNN", "Real-CNN", "MUSIC", "Capon", "Beamforming"]
+        methods = ["CVNN", "Real-CNN", "MUSIC", "ESPRIT", "OMP"]
 
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
     results["CRB"] = {"rmse_r": [], "rmse_theta": [], "time": []}
-
-    # 存储所有SNR的详细样本结果
-    all_snr_samples = {}
 
     # ========================================
     # 基于物理分辨率的网格设置 (学术标准)
@@ -601,18 +595,16 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
     step_r_coarse = res_r / 2
     step_theta_coarse = res_theta / 2
 
-    # 使用物理步长动态生成网格 (标准MUSIC实现)
-    # 粗网格：分辨率/4 (比Nyquist稍密，常见做法)
-    # 细化：在粗搜索峰值附近进行21×21的局部细搜索
-    # 这是文献中常见的做法，平衡了精度和速度
-    num_r_points = max(int(cfg.r_max / (step_r_coarse/2)) + 1, 80)
-    num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / (step_theta_coarse/2)) + 1, 50)
+    # 使用物理步长动态生成网格 (避免栅栏效应 Grid Straddling Loss)
+    num_r_points = max(int(cfg.r_max / step_r_coarse) + 1, 50)  # 至少50点
+    num_theta_points = max(int((cfg.theta_max - cfg.theta_min) / step_theta_coarse) + 1, 30)
 
     r_grid = np.linspace(0, cfg.r_max, num_r_points)
     theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, num_theta_points)
 
     print(f"\n📐 物理分辨率: Range={res_r:.2f}m, Angle={res_theta:.2f}°")
-    print(f"📐 MUSIC网格: {len(r_grid)}×{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点 (基于分辨率/2)")
+    print(f"📐 动态生成网格: {len(r_grid)}×{len(theta_grid)} = {len(r_grid)*len(theta_grid)} 点 (基于分辨率/2)")
+    print(f"📐 所有网格搜索方法 (MUSIC/OMP) 使用相同网格，确保公平对比")
     if music_continuous:
         print(f"🔬 MUSIC 使用连续优化 (消除栅栏效应，逼近 CRB)")
 
@@ -657,43 +649,31 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
             sample_data["Real-CNN"] = (r_est_rcnn, th_est_rcnn)
 
             # MUSIC (可选连续优化版本)
-            if "MUSIC" in methods:
-                t0 = time.time()
-                if music_continuous:
-                    r_est_music, th_est_music = music_2d_continuous(R_complex, r_grid, theta_grid)
-                else:
-                    r_est_music, th_est_music = music_2d_refined(R_complex, r_grid, theta_grid)
-                errors["MUSIC"]["r"].append((r_est_music-r_true)**2)
-                errors["MUSIC"]["theta"].append((th_est_music-theta_true)**2)
-                errors["MUSIC"]["time"].append(time.time()-t0)
-                sample_data["MUSIC"] = (r_est_music, th_est_music)
+            t0 = time.time()
+            if music_continuous:
+                r_est_music, th_est_music = music_2d_continuous(R_complex, r_grid, theta_grid)
+            else:
+                r_est_music, th_est_music = music_2d_refined(R_complex, r_grid, theta_grid)
+            errors["MUSIC"]["r"].append((r_est_music-r_true)**2)
+            errors["MUSIC"]["theta"].append((th_est_music-theta_true)**2)
+            errors["MUSIC"]["time"].append(time.time()-t0)
+            sample_data["MUSIC"] = (r_est_music, th_est_music)
 
-            # Capon
-            if "Capon" in methods:
-                t0 = time.time()
-                r_est_capon, th_est_capon = capon_2d(R_complex, r_grid, theta_grid)
-                errors["Capon"]["r"].append((r_est_capon-r_true)**2)
-                errors["Capon"]["theta"].append((th_est_capon-theta_true)**2)
-                errors["Capon"]["time"].append(time.time()-t0)
-                sample_data["Capon"] = (r_est_capon, th_est_capon)
+            # ESPRIT
+            t0 = time.time()
+            r_est_esprit, th_est_esprit = esprit_2d_robust(R_complex, cfg.M, cfg.N)
+            errors["ESPRIT"]["r"].append((r_est_esprit-r_true)**2)
+            errors["ESPRIT"]["theta"].append((th_est_esprit-theta_true)**2)
+            errors["ESPRIT"]["time"].append(time.time()-t0)
+            sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
 
-            # Beamforming
-            if "Beamforming" in methods:
-                t0 = time.time()
-                r_est_bf, th_est_bf = beamforming_2d(R_complex, r_grid, theta_grid)
-                errors["Beamforming"]["r"].append((r_est_bf-r_true)**2)
-                errors["Beamforming"]["theta"].append((th_est_bf-theta_true)**2)
-                errors["Beamforming"]["time"].append(time.time()-t0)
-                sample_data["Beamforming"] = (r_est_bf, th_est_bf)
-
-            # ESPRIT (可选)
-            if "ESPRIT" in methods:
-                t0 = time.time()
-                r_est_esprit, th_est_esprit = esprit_2d_robust(R_complex, cfg.M, cfg.N)
-                errors["ESPRIT"]["r"].append((r_est_esprit-r_true)**2)
-                errors["ESPRIT"]["theta"].append((th_est_esprit-theta_true)**2)
-                errors["ESPRIT"]["time"].append(time.time()-t0)
-                sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
+            # OMP (与MUSIC使用相同网格，确保公平对比)
+            t0 = time.time()
+            r_est_omp, th_est_omp = omp_2d_refined(R_complex, r_grid, theta_grid, refine=True)
+            errors["OMP"]["r"].append((r_est_omp-r_true)**2)
+            errors["OMP"]["theta"].append((th_est_omp-theta_true)**2)
+            errors["OMP"]["time"].append(time.time()-t0)
+            sample_data["OMP"] = (r_est_omp, th_est_omp)
 
             sample_results.append(sample_data)
 
@@ -718,52 +698,17 @@ def run_benchmark(L_snapshots=None, num_samples=500, fast_mode=False, music_cont
 
         # 输出前5个样本的详细估计结果
         print(f"\n📋 前5个样本的估计结果示例:")
-        # 动态构建表头
-        header = f"{'#':<4} {'真实值':<20}"
-        for m in methods:
-            header += f" {m:<20}"
-        print(header)
-        print("-" * (24 + 20 * len(methods)))
-
+        print(f"{'#':<4} {'真实值':<20} {'CVNN':<20} {'Real-CNN':<20} {'MUSIC':<20} {'ESPRIT':<20} {'OMP':<20}")
+        print("-" * 130)
         for i in range(min(5, len(sample_results))):
             s = sample_results[i]
             true_str = f"({s['r_true']:.1f}m, {s['theta_true']:.1f}°)"
-            row = f"{i+1:<4} {true_str:<20}"
-            for m in methods:
-                if m in s:
-                    method_str = f"({s[m][0]:.1f}m, {s[m][1]:.1f}°)"
-                else:
-                    method_str = "N/A"
-                row += f" {method_str:<20}"
-            print(row)
-
-        # 保存当前SNR的详细样本结果
-        all_snr_samples[f"SNR_{snr}dB"] = sample_results
-
-    # 保存所有详细结果到JSON文件
-    json_output = {
-        "config": {
-            "L_snapshots": L,
-            "num_samples": num_samples,
-            "snr_list": snr_list,
-            "methods": methods,
-            "fast_mode": fast_mode,
-            "music_continuous": music_continuous
-        },
-        "summary": {
-            m: {
-                "rmse_r": results[m]["rmse_r"],
-                "rmse_theta": results[m]["rmse_theta"],
-                "time_ms": [t*1000 for t in results[m]["time"]]
-            } for m in list(methods) + ["CRB"]
-        },
-        "detailed_samples": all_snr_samples
-    }
-
-    json_path = f"results/benchmark_L{L}_detailed.json"
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(json_output, f, indent=2, ensure_ascii=False)
-    print(f"\n💾 详细结果已保存到: {json_path}")
+            cvnn_str = f"({s['CVNN'][0]:.1f}m, {s['CVNN'][1]:.1f}°)"
+            rcnn_str = f"({s['Real-CNN'][0]:.1f}m, {s['Real-CNN'][1]:.1f}°)"
+            music_str = f"({s['MUSIC'][0]:.1f}m, {s['MUSIC'][1]:.1f}°)"
+            esprit_str = f"({s['ESPRIT'][0]:.1f}m, {s['ESPRIT'][1]:.1f}°)"
+            omp_str = f"({s['OMP'][0]:.1f}m, {s['OMP'][1]:.1f}°)"
+            print(f"{i+1:<4} {true_str:<20} {cvnn_str:<20} {rcnn_str:<20} {music_str:<20} {esprit_str:<20} {omp_str:<20}")
 
     return snr_list, results, L
 
@@ -777,22 +722,8 @@ def plot_results(snr_list, results, L_snapshots=None):
     except: pass
 
     methods = [m for m in results.keys() if m != "CRB"]
-    colors = {
-        'CVNN': '#1f77b4',
-        'Real-CNN': '#2ca02c',
-        'MUSIC': '#d62728',
-        'Capon': '#9467bd',
-        'Beamforming': '#8c564b',
-        'ESPRIT': '#ff7f0e'
-    }
-    markers = {
-        'CVNN': 'o',
-        'Real-CNN': '^',
-        'MUSIC': 's',
-        'Capon': 'D',
-        'Beamforming': 'v',
-        'ESPRIT': 'd'
-    }
+    colors = {'CVNN': '#1f77b4', 'Real-CNN': '#2ca02c', 'MUSIC': '#d62728', 'ESPRIT': '#ff7f0e', 'OMP': '#9467bd'}
+    markers = {'CVNN': 'o', 'Real-CNN': '^', 'MUSIC': 's', 'ESPRIT': 'd', 'OMP': 'v'}
 
     fig = plt.figure(figsize=(20, 12))
 
@@ -873,11 +804,8 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*70}\n📊 快拍数对比实验 (SNR={snr_db}dB)\n{'='*70}")
 
-    methods = ["MUSIC", "ESPRIT", "CVNN", "CRB"]
+    methods = ["MUSIC", "ESPRIT", "OMP", "CVNN", "CRB"]
     results = {m: {"rmse_r": [], "rmse_theta": [], "time": []} for m in methods}
-
-    # 存储所有快拍数的详细样本结果
-    all_L_samples = {}
 
     # 基于物理分辨率动态生成网格 (与 run_benchmark 保持一致)
     res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
@@ -897,47 +825,37 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
     cvnn.eval()
 
     for L in L_list:
-        print(f"\n{'='*70}")
-        print(f"📡 L = {L} 快拍")
-        print(f"{'='*70}")
+        print(f"📡 L = {L} 快拍", end="\r")
         cfg.L_snapshots = L
         if not use_random_model:
             cvnn = load_cvnn_model(device, L_snapshots=L)
             cvnn.eval()
 
         errors = {m: {"r": [], "theta": [], "time": []} for m in methods}
-        sample_results = []  # 存储详细结果
 
-        for sample_idx in tqdm(range(num_samples), leave=False):
+        for _ in tqdm(range(num_samples), leave=False):
             r_true = np.random.uniform(0, cfg.r_max)
             theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
             R = generate_covariance_matrix(r_true, theta_true, snr_db)
             R_complex = R[0] + 1j * R[1]
             R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device)
 
-            sample_data = {"r_true": r_true, "theta_true": theta_true}
-
-            t0 = time.time()
-            pred = cvnn(R_tensor).cpu().detach().numpy()[0]
-            r_est_cvnn = pred[0]*cfg.r_max
-            th_est_cvnn = pred[1]*(cfg.theta_max-cfg.theta_min)+cfg.theta_min
-            errors["CVNN"]["r"].append((r_est_cvnn - r_true)**2)
+            t0 = time.time(); pred = cvnn(R_tensor).cpu().detach().numpy()[0]
+            errors["CVNN"]["r"].append((pred[0]*cfg.r_max - r_true)**2)
             errors["CVNN"]["time"].append(time.time()-t0)
-            sample_data["CVNN"] = (r_est_cvnn, th_est_cvnn)
 
-            t0 = time.time()
-            r_est_music, th_est_music = music_2d_refined(R_complex, r_grid, theta_grid)
-            errors["MUSIC"]["r"].append((r_est_music - r_true)**2)
+            t0 = time.time(); r_est, _ = music_2d_refined(R_complex, r_grid, theta_grid)
+            errors["MUSIC"]["r"].append((r_est - r_true)**2)
             errors["MUSIC"]["time"].append(time.time()-t0)
-            sample_data["MUSIC"] = (r_est_music, th_est_music)
 
-            t0 = time.time()
-            r_est_esprit, th_est_esprit = esprit_2d_robust(R_complex, cfg.M, cfg.N)
-            errors["ESPRIT"]["r"].append((r_est_esprit - r_true)**2)
+            t0 = time.time(); r_est, _ = esprit_2d_robust(R_complex, cfg.M, cfg.N)
+            errors["ESPRIT"]["r"].append((r_est - r_true)**2)
             errors["ESPRIT"]["time"].append(time.time()-t0)
-            sample_data["ESPRIT"] = (r_est_esprit, th_est_esprit)
 
-            sample_results.append(sample_data)
+            # OMP (与MUSIC使用相同网格)
+            t0 = time.time(); r_est, _ = omp_2d_refined(R_complex, r_grid, theta_grid, refine=True)
+            errors["OMP"]["r"].append((r_est - r_true)**2)
+            errors["OMP"]["time"].append(time.time()-t0)
 
         for m in methods:
             if m != "CRB":
@@ -947,376 +865,20 @@ def run_snapshots_benchmark(snr_db=0, L_list=None, num_samples=200, use_random_m
         crb_r, _ = compute_crb_average(snr_db, L=L, num_samples=200)
         results["CRB"]["rmse_r"].append(crb_r)
 
-        # 输出统计结果
-        print(f"\n📊 L={L} 各算法性能统计:")
-        print(f"{'Method':<12} {'RMSE_r (m)':<12} {'Time (ms)':<12}")
-        print("-" * 40)
-        for m in methods:
-            if m != "CRB":
-                print(f"{m:<12} {results[m]['rmse_r'][-1]:<12.4f} {results[m]['time'][-1]*1000:<12.4f}")
-        print(f"{'CRB':<12} {results['CRB']['rmse_r'][-1]:<12.4f} {'N/A':<12}")
+        print(f"L={L:<3} | CVNN: {results['CVNN']['rmse_r'][-1]:.2f}m | OMP: {results['OMP']['rmse_r'][-1]:.2f}m")
 
-        # 输出前5个样本的详细估计结果
-        print(f"\n📋 前5个样本的估计结果示例:")
-        # 动态构建表头
-        display_methods = [m for m in methods if m != "CRB"]
-        header = f"{'#':<4} {'真实值':<20}"
-        for m in display_methods:
-            header += f" {m:<20}"
-        print(header)
-        print("-" * (24 + 20 * len(display_methods)))
-
-        for i in range(min(5, len(sample_results))):
-            s = sample_results[i]
-            true_str = f"({s['r_true']:.1f}m, {s['theta_true']:.1f}°)"
-            row = f"{i+1:<4} {true_str:<20}"
-            for m in display_methods:
-                if m in s:
-                    method_str = f"({s[m][0]:.1f}m, {s[m][1]:.1f}°)"
-                else:
-                    method_str = "N/A"
-                row += f" {method_str:<20}"
-            print(row)
-
-        # 保存当前快拍数的详细样本结果
-        all_L_samples[f"L_{L}"] = sample_results
-
-    # 保存所有详细结果到JSON文件
-    json_output = {
-        "config": {
-            "snr_db": snr_db,
-            "L_list": L_list,
-            "num_samples": num_samples,
-            "methods": [m for m in methods if m != "CRB"],
-            "use_random_model": use_random_model
-        },
-        "summary": {
-            m: {
-                "rmse_r": results[m]["rmse_r"],
-                "time_ms": [t*1000 for t in results[m]["time"]] if m != "CRB" else []
-            } for m in methods
-        },
-        "detailed_samples": all_L_samples
-    }
-
-    json_path = f"results/snapshots_SNR{snr_db}dB_detailed.json"
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(json_output, f, indent=2, ensure_ascii=False)
-    print(f"\n💾 详细结果已保存到: {json_path}")
-
-    # 使用与 plot_results 一致的颜色和标记
-    colors = {
-        'CVNN': '#1f77b4',
-        'Real-CNN': '#2ca02c',
-        'MUSIC': '#d62728',
-        'Capon': '#9467bd',
-        'Beamforming': '#8c564b',
-        'ESPRIT': '#ff7f0e'
-    }
-    markers = {
-        'CVNN': 'o',
-        'Real-CNN': '^',
-        'MUSIC': 's',
-        'Capon': 'D',
-        'Beamforming': 'v',
-        'ESPRIT': 'd'
-    }
-    
     plt.figure(figsize=(10, 6))
     for m in methods:
-        if m == "CRB": continue  # CRB 单独画
         if m == "ESPRIT" and np.mean(results[m]["rmse_r"]) > 500: continue
-        plt.plot(L_list, results[m]["rmse_r"], 
-                 color=colors.get(m, 'gray'), 
-                 marker=markers.get(m, 'o'), 
-                 linewidth=2, markersize=8, label=m)
-    plt.plot(L_list, results["CRB"]["rmse_r"], 'k--', linewidth=2, label='CRB')
+        plt.plot(L_list, results[m]["rmse_r"], 'o-', label=m)
+    plt.plot(L_list, results["CRB"]["rmse_r"], 'k--', label='CRB')
     plt.xscale('log'); plt.yscale('log')
-    plt.xlabel('Snapshots (L)', fontsize=12)
-    plt.ylabel('RMSE Range (m)', fontsize=12)
-    plt.title(f'Performance vs Snapshots (SNR={snr_db}dB)', fontsize=14)
-    plt.legend(fontsize=10)
-    plt.grid(True, which='both', linestyle='--', alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(f'results/snapshots_SNR{snr_db}dB.png', dpi=300)
-    print(f"\n✅ 图表已保存: results/snapshots_SNR{snr_db}dB.png")
-    
+    plt.xlabel('Snapshots (L)'); plt.ylabel('RMSE Range (m)')
+    plt.title(f'Performance vs Snapshots (SNR={snr_db}dB)')
+    plt.legend(); plt.grid(True, which='both')
+    plt.savefig(f'results/snapshots_SNR{snr_db}dB.png')
+
     return L_list, results
-
-
-# ==========================================
-# 8. MUSIC 精度-速度权衡分析
-# ==========================================
-def run_accuracy_speed_tradeoff(snr_db=20, num_samples=200, L_snapshots=None):
-    """
-    分析不同MUSIC配置的精度-速度权衡
-
-    对比：
-    1. MUSIC (粗网格) - 快速但精度一般
-    2. MUSIC (标准网格) - 平衡
-    3. MUSIC (细网格) - 精度高但较慢
-    4. MUSIC (连续优化) - 最高精度但最慢
-    5. ESPRIT - 快速参数化方法
-    6. CVNN - 深度学习方法
-    7. CRB - 理论下界
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    L = L_snapshots or cfg.L_snapshots
-
-    print("\n" + "="*70)
-    print(f"📊 精度-速度权衡分析 (SNR={snr_db}dB, L={L})")
-    print("="*70)
-
-    # 加载模型
-    cvnn = load_cvnn_model(device, L_snapshots=L)
-    cvnn.eval()
-
-    # 预热
-    dummy = torch.randn(1, 2, cfg.M * cfg.N, cfg.M * cfg.N).to(device)
-    for _ in range(3): cvnn(dummy)
-
-    # 定义不同的MUSIC配置
-    res_r = cfg.c / (2 * cfg.M * cfg.delta_f)
-    res_theta = np.rad2deg(cfg.wavelength / (cfg.N * cfg.d))
-
-    music_configs = {
-        "MUSIC (粗网格)": {
-            "r_points": 30,
-            "theta_points": 20,
-            "refine": False,
-            "continuous": False
-        },
-        "MUSIC (标准网格)": {
-            "r_points": max(int(cfg.r_max / (res_r/2)) + 1, 50),
-            "theta_points": max(int((cfg.theta_max - cfg.theta_min) / (res_theta/2)) + 1, 30),
-            "refine": True,
-            "continuous": False
-        },
-        "MUSIC (细网格)": {
-            "r_points": 150,
-            "theta_points": 100,
-            "refine": True,
-            "continuous": False
-        },
-        "MUSIC (连续优化)": {
-            "r_points": max(int(cfg.r_max / (res_r/2)) + 1, 50),
-            "theta_points": max(int((cfg.theta_max - cfg.theta_min) / (res_theta/2)) + 1, 30),
-            "refine": False,
-            "continuous": True
-        }
-    }
-
-    # 存储结果
-    results = {}
-
-    # 测试每种配置
-    for config_name, config in music_configs.items():
-        print(f"\n测试 {config_name}...")
-        r_grid = np.linspace(0, cfg.r_max, config["r_points"])
-        theta_grid = np.linspace(cfg.theta_min, cfg.theta_max, config["theta_points"])
-
-        errors_r = []
-        errors_theta = []
-        times = []
-
-        for _ in tqdm(range(num_samples), desc=config_name, leave=False):
-            r_true = np.random.uniform(0, cfg.r_max)
-            theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
-            R = generate_covariance_matrix(r_true, theta_true, snr_db)
-            R_complex = R[0] + 1j * R[1]
-
-            t0 = time.time()
-            if config["continuous"]:
-                r_est, theta_est = music_2d_continuous(R_complex, r_grid, theta_grid)
-            else:
-                r_est, theta_est = music_2d_refined(R_complex, r_grid, theta_grid, refine=config["refine"])
-            elapsed = time.time() - t0
-
-            errors_r.append((r_est - r_true)**2)
-            errors_theta.append((theta_est - theta_true)**2)
-            times.append(elapsed)
-
-        results[config_name] = {
-            "rmse_r": np.sqrt(np.mean(errors_r)),
-            "rmse_theta": np.sqrt(np.mean(errors_theta)),
-            "time_ms": np.mean(times) * 1000,
-            "grid_size": config["r_points"] * config["theta_points"]
-        }
-
-    # 测试 ESPRIT
-    print(f"\n测试 ESPRIT...")
-    errors_r = []
-    errors_theta = []
-    times = []
-
-    for _ in tqdm(range(num_samples), desc="ESPRIT", leave=False):
-        r_true = np.random.uniform(0, cfg.r_max)
-        theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
-        R = generate_covariance_matrix(r_true, theta_true, snr_db)
-        R_complex = R[0] + 1j * R[1]
-
-        t0 = time.time()
-        r_est, theta_est = esprit_2d_robust(R_complex, cfg.M, cfg.N)
-        elapsed = time.time() - t0
-
-        errors_r.append((r_est - r_true)**2)
-        errors_theta.append((theta_est - theta_true)**2)
-        times.append(elapsed)
-
-    results["ESPRIT"] = {
-        "rmse_r": np.sqrt(np.mean(errors_r)),
-        "rmse_theta": np.sqrt(np.mean(errors_theta)),
-        "time_ms": np.mean(times) * 1000,
-        "grid_size": 0
-    }
-
-    # 测试 CVNN
-    print(f"\n测试 CVNN...")
-    errors_r = []
-    errors_theta = []
-    times = []
-
-    for _ in tqdm(range(num_samples), desc="CVNN", leave=False):
-        r_true = np.random.uniform(0, cfg.r_max)
-        theta_true = np.random.uniform(cfg.theta_min, cfg.theta_max)
-        R = generate_covariance_matrix(r_true, theta_true, snr_db)
-        R_tensor = torch.FloatTensor(R).unsqueeze(0).to(device)
-
-        t0 = time.time()
-        with torch.no_grad():
-            pred = cvnn(R_tensor).cpu().numpy()[0]
-        elapsed = time.time() - t0
-
-        r_est = pred[0] * cfg.r_max
-        theta_est = pred[1] * (cfg.theta_max - cfg.theta_min) + cfg.theta_min
-
-        errors_r.append((r_est - r_true)**2)
-        errors_theta.append((theta_est - theta_true)**2)
-        times.append(elapsed)
-
-    results["CVNN"] = {
-        "rmse_r": np.sqrt(np.mean(errors_r)),
-        "rmse_theta": np.sqrt(np.mean(errors_theta)),
-        "time_ms": np.mean(times) * 1000,
-        "grid_size": 0
-    }
-
-    # 计算 CRB
-    print(f"\n计算 CRB...")
-    crb_r, crb_theta = compute_crb_average(snr_db, L=L, num_samples=200)
-    results["CRB"] = {
-        "rmse_r": crb_r,
-        "rmse_theta": crb_theta,
-        "time_ms": 0,
-        "grid_size": 0
-    }
-
-    # 打印结果表格
-    print("\n" + "="*90)
-    print(f"{'方法':<20} {'RMSE_r (m)':<12} {'RMSE_θ (°)':<12} {'时间 (ms)':<12} {'网格大小':<12} {'加速比':<10}")
-    print("-" * 90)
-
-    # 按时间排序
-    sorted_methods = sorted([k for k in results.keys() if k != "CRB"],
-                           key=lambda x: results[x]["time_ms"])
-
-    # 找到最慢的MUSIC作为参考
-    slowest_music_time = max([results[k]["time_ms"] for k in results.keys()
-                              if k.startswith("MUSIC")])
-
-    for method in sorted_methods:
-        r = results[method]
-        speedup = slowest_music_time / r["time_ms"] if r["time_ms"] > 0 else float('inf')
-        grid_str = f"{r['grid_size']}" if r['grid_size'] > 0 else "N/A"
-        print(f"{method:<20} {r['rmse_r']:<12.2f} {r['rmse_theta']:<12.2f} "
-              f"{r['time_ms']:<12.1f} {grid_str:<12} {speedup:<10.1f}x")
-
-    # CRB单独显示
-    r = results["CRB"]
-    print(f"{'CRB':<20} {r['rmse_r']:<12.2f} {r['rmse_theta']:<12.2f} "
-          f"{'N/A':<12} {'N/A':<12} {'N/A':<10}")
-
-    # 生成可视化
-    plot_accuracy_speed_tradeoff(results, snr_db, L)
-
-    return results
-
-
-def plot_accuracy_speed_tradeoff(results, snr_db, L):
-    """绘制精度-速度权衡图"""
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
-    # 准备数据
-    methods = [k for k in results.keys() if k != "CRB"]
-    times = [results[m]["time_ms"] for m in methods]
-    rmse_r = [results[m]["rmse_r"] for m in methods]
-    rmse_theta = [results[m]["rmse_theta"] for m in methods]
-
-    crb_r = results["CRB"]["rmse_r"]
-    crb_theta = results["CRB"]["rmse_theta"]
-
-    # 颜色和标记
-    colors = []
-    markers = []
-    for m in methods:
-        if "MUSIC" in m:
-            colors.append('#d62728')
-            if "粗" in m: markers.append('v')
-            elif "标准" in m: markers.append('s')
-            elif "细" in m: markers.append('^')
-            elif "连续" in m: markers.append('D')
-            else: markers.append('s')
-        elif m == "ESPRIT":
-            colors.append('#ff7f0e')
-            markers.append('d')
-        elif m == "CVNN":
-            colors.append('#1f77b4')
-            markers.append('o')
-        else:
-            colors.append('gray')
-            markers.append('x')
-
-    # 子图1: 距离精度 vs 时间
-    ax1 = axes[0]
-    for i, m in enumerate(methods):
-        ax1.scatter(times[i], rmse_r[i], c=colors[i], marker=markers[i],
-                   s=150, label=m, alpha=0.8, edgecolors='black', linewidths=1.5)
-
-    ax1.axhline(crb_r, color='black', linestyle='--', linewidth=2, label='CRB', alpha=0.6)
-    ax1.set_xlabel('推理时间 (ms)', fontsize=12)
-    ax1.set_ylabel('RMSE 距离 (m)', fontsize=12)
-    ax1.set_title(f'精度-速度权衡: 距离估计 (SNR={snr_db}dB, L={L})', fontsize=13)
-    ax1.set_xscale('log')
-    ax1.set_yscale('log')
-    ax1.grid(True, which='both', linestyle='--', alpha=0.3)
-    ax1.legend(fontsize=9, loc='best')
-
-    # 标注CVNN的优势区域
-    cvnn_idx = methods.index("CVNN")
-    ax1.annotate('CVNN\n(快速+精确)',
-                xy=(times[cvnn_idx], rmse_r[cvnn_idx]),
-                xytext=(times[cvnn_idx]*3, rmse_r[cvnn_idx]*0.7),
-                fontsize=10, color='#1f77b4', weight='bold',
-                arrowprops=dict(arrowstyle='->', color='#1f77b4', lw=2))
-
-    # 子图2: 角度精度 vs 时间
-    ax2 = axes[1]
-    for i, m in enumerate(methods):
-        ax2.scatter(times[i], rmse_theta[i], c=colors[i], marker=markers[i],
-                   s=150, label=m, alpha=0.8, edgecolors='black', linewidths=1.5)
-
-    ax2.axhline(crb_theta, color='black', linestyle='--', linewidth=2, label='CRB', alpha=0.6)
-    ax2.set_xlabel('推理时间 (ms)', fontsize=12)
-    ax2.set_ylabel('RMSE 角度 (°)', fontsize=12)
-    ax2.set_title(f'精度-速度权衡: 角度估计 (SNR={snr_db}dB, L={L})', fontsize=13)
-    ax2.set_xscale('log')
-    ax2.set_yscale('log')
-    ax2.grid(True, which='both', linestyle='--', alpha=0.3)
-    ax2.legend(fontsize=9, loc='best')
-
-    plt.tight_layout()
-    plt.savefig(f'results/accuracy_speed_tradeoff_SNR{snr_db}dB_L{L}.png', dpi=300, bbox_inches='tight')
-    print(f"\n✅ 精度-速度权衡图已保存: results/accuracy_speed_tradeoff_SNR{snr_db}dB_L{L}.png")
 
 
 if __name__ == "__main__":
