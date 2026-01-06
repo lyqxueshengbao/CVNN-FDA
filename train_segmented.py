@@ -18,10 +18,10 @@ import numpy as np
 from tqdm import tqdm
 import json
 import argparse
+from typing import Optional, Sequence
 
 import config as cfg
 from model import FDA_CVNN, FDA_CVNN_Attention
-from dataset import FastDataLoader
 from utils_physics import generate_covariance_matrix, denormalize_labels
 
 
@@ -44,6 +44,106 @@ class RangeAngleLoss(nn.Module):
         loss_theta = self.criterion(theta_pred, theta_target)
         
         return self.range_weight * loss_r + self.lambda_angle * loss_theta
+
+
+class RangeAngleLossV2(nn.Module):
+    """
+    与 train.py 对齐的可选损失：
+    - l1: 加权 MAE
+    - l2: (r,theta) 2D 欧氏距离
+    - complex: 极坐标映射后的复距离 (theta 映射与 train.py 一致)
+
+    支持返回逐样本 loss 以做 SNR-aware 加权。
+    """
+
+    def __init__(self, lambda_angle=1.0, range_weight=2.0, loss_type="l1"):
+        super().__init__()
+        self.lambda_angle = float(lambda_angle)
+        self.range_weight = float(range_weight)
+        self.loss_type = str(loss_type)
+
+    def forward(self, pred, target, reduction="mean"):
+        diff_r = pred[:, 0] - target[:, 0]
+        diff_theta = pred[:, 1] - target[:, 1]
+
+        if self.loss_type == "l2":
+            loss = torch.sqrt(
+                (self.range_weight * diff_r).pow(2)
+                + (self.lambda_angle * diff_theta).pow(2)
+                + 1e-8
+            )
+        elif self.loss_type == "complex":
+            theta_p = (pred[:, 1] - 0.5) * np.pi
+            theta_t = (target[:, 1] - 0.5) * np.pi
+            r_p = self.range_weight * pred[:, 0]
+            r_t = self.range_weight * target[:, 0]
+            loss = torch.sqrt(
+                (r_p * torch.cos(theta_p) - r_t * torch.cos(theta_t)).pow(2)
+                + (r_p * torch.sin(theta_p) - r_t * torch.sin(theta_t)).pow(2)
+                + 1e-8
+            )
+        else:
+            loss = self.range_weight * diff_r.abs() + self.lambda_angle * diff_theta.abs()
+
+        if reduction == "none":
+            return loss
+        return loss.mean()
+
+
+class SNRAwareWeightedLoss(nn.Module):
+    """对低SNR样本赋更高权重（思路来自 train_lowsnr.py）。"""
+
+    def __init__(self, base_loss: RangeAngleLossV2, snr_min: float, snr_max: float, low_snr_weight: float = 3.0):
+        super().__init__()
+        self.base_loss = base_loss
+        self.snr_min = float(snr_min)
+        self.snr_max = float(snr_max)
+        self.low_snr_weight = float(low_snr_weight)
+
+    def forward(self, pred, target, snr_db: Optional[torch.Tensor] = None):
+        per_sample = self.base_loss(pred, target, reduction="none")  # [B]
+        if snr_db is None:
+            return per_sample.mean()
+
+        denom = max(self.snr_max - self.snr_min, 1e-6)
+        normalized = (snr_db - self.snr_min) / denom
+        weights = self.low_snr_weight - (self.low_snr_weight - 1.0) * normalized
+        weights = weights.clamp(min=1.0, max=self.low_snr_weight)
+        return (per_sample * weights).mean()
+
+
+class FastSNRDataLoader:
+    """GPU上在线生成训练数据，并返回 snr_db 以支持 SNR-aware loss。"""
+
+    def __init__(
+        self,
+        batch_size: int,
+        num_samples: int,
+        device,
+        snr_range,
+        low_snr_prob: float = 0.5,
+        low_snr_split: Optional[float] = None,
+    ):
+        self.batch_size = int(batch_size)
+        self.num_samples = int(num_samples)
+        self.num_batches = max(self.num_samples // self.batch_size, 1)
+        self.device = device
+        self.snr_range = (float(snr_range[0]), float(snr_range[1]))
+        self.low_snr_prob = float(low_snr_prob)
+        self.low_snr_split = None if low_snr_split is None else float(low_snr_split)
+
+    def __iter__(self):
+        for _ in range(self.num_batches):
+            yield generate_batch_with_snr_bias(
+                batch_size=self.batch_size,
+                device=self.device,
+                snr_range=self.snr_range,
+                low_snr_prob=self.low_snr_prob,
+                low_snr_split=self.low_snr_split,
+            )
+
+    def __len__(self):
+        return self.num_batches
 
 
 def generate_batch_snr_range(batch_size, device, snr_min, snr_max):
@@ -113,8 +213,135 @@ def generate_batch_snr_range(batch_size, device, snr_min, snr_max):
     return R_tensor, labels
 
 
-def train_snr_specific(model, device, snr_min, snr_max, epochs=100, 
-                       batch_size=64, model_name="model", train_samples=50000, lr=5e-4):
+def generate_batch_with_snr_bias(
+    batch_size,
+    device,
+    snr_range,
+    low_snr_prob=0.7,
+    low_snr_split=-10.0,
+):
+    """
+    在 snr_range=(min,max) 内对更低的SNR区间过采样，返回 snr_db 以做加权训练。
+    - 低SNR区间: [snr_min, low_snr_split]
+    - 高SNR区间: [low_snr_split, snr_max]
+    """
+    snr_min, snr_max = float(snr_range[0]), float(snr_range[1])
+    snr_split = None if low_snr_split is None else float(low_snr_split)
+
+    c = cfg.c
+    delta_f = cfg.delta_f
+    d = cfg.d
+    wavelength = cfg.wavelength
+    M = cfg.M
+    N = cfg.N
+    L = cfg.L_snapshots
+
+    r = torch.rand(batch_size, 1, device=device) * (cfg.r_max - cfg.r_min) + cfg.r_min
+    theta = torch.rand(batch_size, 1, device=device) * (cfg.theta_max - cfg.theta_min) + cfg.theta_min
+
+    if snr_split is None:
+        snr_db = torch.rand(batch_size, 1, device=device) * (snr_max - snr_min) + snr_min
+    else:
+        snr_split = min(max(snr_split, snr_min), snr_max)
+        low_mask = (torch.rand(batch_size, 1, device=device) < float(low_snr_prob))
+        snr_low = torch.rand(batch_size, 1, device=device) * (snr_split - snr_min) + snr_min
+        snr_high = torch.rand(batch_size, 1, device=device) * (snr_max - snr_split) + snr_split
+        snr_db = torch.where(low_mask, snr_low, snr_high)
+
+    theta_rad = torch.deg2rad(theta)
+
+    m = torch.arange(M, device=device).float().unsqueeze(0)
+    n = torch.arange(N, device=device).float().unsqueeze(0)
+
+    phi_range = -4 * torch.pi * delta_f * m * r / c
+    phi_angle_tx = 2 * torch.pi * d * m * torch.sin(theta_rad) / wavelength
+    a_tx = torch.exp(1j * (phi_range + phi_angle_tx))
+
+    phi_angle_rx = 2 * torch.pi * d * n * torch.sin(theta_rad) / wavelength
+    a_rx = torch.exp(1j * phi_angle_rx)
+
+    u = (a_tx.unsqueeze(2) * a_rx.unsqueeze(1)).view(batch_size, -1).unsqueeze(2)
+
+    s_real = torch.randn(batch_size, 1, L, device=device)
+    s_imag = torch.randn(batch_size, 1, L, device=device)
+    s = (s_real + 1j * s_imag) / np.sqrt(2)
+    X_clean = torch.matmul(u, s)
+
+    n_real = torch.randn(batch_size, M * N, L, device=device)
+    n_imag = torch.randn(batch_size, M * N, L, device=device)
+    noise = (n_real + 1j * n_imag) / np.sqrt(2)
+
+    power_sig = torch.mean(torch.abs(X_clean) ** 2, dim=(1, 2), keepdim=True)
+    power_noise = power_sig / (10 ** (snr_db.unsqueeze(2) / 10.0))
+    X = X_clean + torch.sqrt(power_noise) * noise
+
+    R = torch.matmul(X, X.transpose(1, 2).conj()) / L
+    max_val = torch.amax(torch.abs(R), dim=(1, 2), keepdim=True)
+    R = R / (max_val + 1e-10)
+    R_tensor = torch.stack([R.real, R.imag], dim=1).float()
+
+    r_norm = r / cfg.r_max
+    theta_norm = (theta - cfg.theta_min) / (cfg.theta_max - cfg.theta_min)
+    labels = torch.cat([r_norm, theta_norm], dim=1).float()
+
+    return R_tensor, labels, snr_db.squeeze(1)
+
+
+def evaluate_rmse_on_snr_list(
+    model,
+    device,
+    snr_list: Sequence[float],
+    batch_size: int = 64,
+    batches_per_snr: int = 8,
+):
+    """快速评估：用GPU生成固定SNR数据，返回各SNR的RMSE以及均值。"""
+    model.eval()
+    rmse_r_list, rmse_theta_list = [], []
+    with torch.no_grad():
+        for snr in snr_list:
+            all_preds, all_labels = [], []
+            for _ in range(int(batches_per_snr)):
+                R, labels = generate_batch_snr_range(batch_size, device, float(snr), float(snr))
+                preds = model(R)
+                all_preds.append(preds.detach().cpu())
+                all_labels.append(labels.detach().cpu())
+            all_preds = torch.cat(all_preds, dim=0).numpy()
+            all_labels = torch.cat(all_labels, dim=0).numpy()
+            preds_phys = denormalize_labels(all_preds)
+            labels_phys = denormalize_labels(all_labels)
+            rmse_r = np.sqrt(np.mean((preds_phys[:, 0] - labels_phys[:, 0]) ** 2))
+            rmse_theta = np.sqrt(np.mean((preds_phys[:, 1] - labels_phys[:, 1]) ** 2))
+            rmse_r_list.append(float(rmse_r))
+            rmse_theta_list.append(float(rmse_theta))
+    return {
+        "snr_list": [float(x) for x in snr_list],
+        "rmse_r": rmse_r_list,
+        "rmse_theta": rmse_theta_list,
+        "rmse_r_mean": float(np.mean(rmse_r_list)) if rmse_r_list else float("nan"),
+        "rmse_theta_mean": float(np.mean(rmse_theta_list)) if rmse_theta_list else float("nan"),
+    }
+
+
+def train_snr_specific(
+    model,
+    device,
+    snr_min,
+    snr_max,
+    epochs=100,
+    batch_size=64,
+    model_name="model",
+    train_samples=50000,
+    lr=5e-4,
+    loss_type="l1",
+    use_snr_aware=False,
+    low_snr_weight=3.0,
+    low_snr_prob=0.7,
+    low_snr_split=-10.0,
+    grad_clip=1.0,
+    focus_snr_list: Optional[Sequence[float]] = None,
+    focus_batches_per_snr: int = 8,
+    eval_interval: int = 10,
+):
     """
     训练特定SNR范围的模型 (与 train.py 保持一致)
     
@@ -129,18 +356,31 @@ def train_snr_specific(model, device, snr_min, snr_max, epochs=100,
     # 与 train.py 一致: CosineAnnealingLR
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
     # 与 train.py 一致: RangeAngleLoss
-    criterion = RangeAngleLoss(lambda_angle=1.0, range_weight=2.0)
+    base_loss = RangeAngleLossV2(lambda_angle=1.0, range_weight=2.0, loss_type=loss_type)
+    criterion = (
+        SNRAwareWeightedLoss(
+            base_loss,
+            snr_min=float(snr_min),
+            snr_max=float(snr_max),
+            low_snr_weight=float(low_snr_weight),
+        )
+        if use_snr_aware
+        else base_loss
+    )
     
     best_val_loss = float('inf')
     best_rmse_r = float('inf')
     
-    # 使用 FastDataLoader (与 train.py 一致，GPU直接生成)
-    print("启用 GPU 加速数据生成 (FastDataLoader)...")
-    train_loader = FastDataLoader(
+    print("启用 GPU 加速数据生成 ...")
+    if use_snr_aware:
+        print(f"  -> SNR-aware: weight={low_snr_weight}, prob={low_snr_prob}, split={low_snr_split}")
+    train_loader = FastSNRDataLoader(
         batch_size=batch_size,
         num_samples=train_samples,
         snr_range=(snr_min, snr_max),
-        device=device
+        device=device,
+        low_snr_prob=float(low_snr_prob) if use_snr_aware else 0.5,
+        low_snr_split=float(low_snr_split) if use_snr_aware else None,
     )
     
     print("="*60)
@@ -149,6 +389,7 @@ def train_snr_specific(model, device, snr_min, snr_max, epochs=100,
     print(f"Epochs: {epochs}, Batch Size: {batch_size}")
     print(f"训练样本数: {train_samples}")
     print(f"学习率: {lr}")
+    print(f"Loss: {loss_type}" + (" + snr-aware" if use_snr_aware else ""))
     print(f"模型参数量: {model.count_parameters():,}")
     print("="*60)
     
@@ -160,14 +401,17 @@ def train_snr_specific(model, device, snr_min, snr_max, epochs=100,
         
         # 使用 tqdm 显示进度
         pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{epochs}', leave=False)
-        for batch_x, batch_y in pbar:
+        for batch_x, batch_y, snr_db in pbar:
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
+            snr_db = snr_db.to(device)
             
             optimizer.zero_grad()
             preds = model(batch_x)
-            loss = criterion(preds, batch_y)
+            loss = criterion(preds, batch_y, snr_db) if use_snr_aware else criterion(preds, batch_y)
             loss.backward()
+            if grad_clip is not None and float(grad_clip) > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip))
             optimizer.step()
             
             epoch_loss += loss.item()
@@ -193,9 +437,20 @@ def train_snr_specific(model, device, snr_min, snr_max, epochs=100,
         
         with torch.no_grad():
             for _ in range(val_batches):
-                R, labels = generate_batch_snr_range(batch_size, device, snr_min, snr_max)
-                preds = model(R)
-                val_loss += criterion(preds, labels).item()
+                if use_snr_aware:
+                    R, labels, v_snr = generate_batch_with_snr_bias(
+                        batch_size=batch_size,
+                        device=device,
+                        snr_range=(snr_min, snr_max),
+                        low_snr_prob=low_snr_prob,
+                        low_snr_split=low_snr_split,
+                    )
+                    preds = model(R)
+                    val_loss += criterion(preds, labels, v_snr).item()
+                else:
+                    R, labels = generate_batch_snr_range(batch_size, device, snr_min, snr_max)
+                    preds = model(R)
+                    val_loss += criterion(preds, labels).item()
                 all_preds.append(preds.cpu())
                 all_labels.append(labels.cpu())
         
@@ -211,18 +466,44 @@ def train_snr_specific(model, device, snr_min, snr_max, epochs=100,
         
         scheduler.step()
         
-        # 保存最佳 (基于验证集 RMSE_r)
-        if rmse_r < best_rmse_r:
-            best_rmse_r = rmse_r
+        # 额外关注点：例如 [-15,-10]，用于挑选best（避免best被-5~0支配）
+        use_focus = bool(focus_snr_list)
+        focus_detail = None
+        metric_for_best = None
+        if use_focus:
+            if epoch == 1 or (int(eval_interval) > 0 and epoch % int(eval_interval) == 0):
+                focus_detail = evaluate_rmse_on_snr_list(
+                    model,
+                    device,
+                    snr_list=focus_snr_list,
+                    batch_size=batch_size,
+                    batches_per_snr=focus_batches_per_snr,
+                )
+                metric_for_best = focus_detail["rmse_r_mean"]
+        else:
+            metric_for_best = rmse_r
+
+        saved_best = False
+        # 保存最佳：默认按 rmse_r；若提供 focus_snr_list 则按 focus_rmse_r
+        if metric_for_best is not None and metric_for_best < best_rmse_r:
+            best_rmse_r = metric_for_best
             best_val_loss = val_loss
+            saved_best = True
             save_path = f'checkpoints/{model_name}_L{cfg.L_snapshots}_best.pth'
             torch.save({
                 'epoch': epoch,
                 'snr_range': (snr_min, snr_max),
+                'loss_type': str(loss_type),
+                'use_snr_aware': bool(use_snr_aware),
+                'low_snr_weight': float(low_snr_weight),
+                'low_snr_prob': float(low_snr_prob),
+                'low_snr_split': float(low_snr_split) if low_snr_split is not None else None,
                 'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),  # 保存优化器状态，支持断点续训
                 'val_loss': val_loss,
                 'rmse_r': float(rmse_r),
-                'rmse_theta': float(rmse_theta)
+                'rmse_theta': float(rmse_theta),
+                'focus': focus_detail,
             }, save_path)
         
         # 打印进度 (每10个epoch或第1个epoch)
@@ -230,9 +511,14 @@ def train_snr_specific(model, device, snr_min, snr_max, epochs=100,
             print(f"Epoch {epoch:3d}/{epochs} "
                   f"Train: loss={epoch_loss:.4f} RMSE_r={train_rmse_r:.1f}m | "
                   f"Val: loss={val_loss:.4f} RMSE_r={rmse_r:.1f}m RMSE_θ={rmse_theta:.2f}°"
-                  + (" ⭐" if rmse_r == best_rmse_r else ""))
+                  + (" [BEST]" if saved_best else ""))
+            if focus_detail is not None:
+                print(
+                    f"  Focus@{focus_detail['snr_list']}: RMSE_r_mean={focus_detail['rmse_r_mean']:.1f}m "
+                    f"RMSE_θ_mean={focus_detail['rmse_theta_mean']:.2f}°"
+                )
     
-    print(f"\n训练完成! 最佳 RMSE_r: {best_rmse_r:.2f}m")
+    print(f"\n训练完成! best_metric(RMSE_r or focus_rmse_r) = {best_rmse_r:.2f}m")
     print(f"模型保存至: checkpoints/{model_name}_L{cfg.L_snapshots}_best.pth")
     return best_rmse_r
 
@@ -324,6 +610,20 @@ if __name__ == "__main__":
     parser.add_argument('--samples', type=int, default=50000, help='训练样本数 (原 main.py: --samples)')
     parser.add_argument('--batch', type=int, default=64, help='批次大小 (原 main.py: --batch)')
     parser.add_argument('--lr', type=float, default=5e-4, help='学习率')
+    parser.add_argument('--loss', type=str, default='l1',
+                        choices=['l1', 'l2', 'complex'],
+                        help='loss: l1/l2/complex (与 train.py 一致)')
+    parser.add_argument('--no-snr-aware', action='store_true',
+                        help='禁用SNR-aware（默认训练低SNR模型时启用：偏置采样+加权loss）')
+    parser.add_argument('--low-snr-weight', type=float, default=3.0, help='SNR-aware: 低SNR最大权重')
+    parser.add_argument('--low-snr-prob', type=float, default=0.7, help='SNR-aware: 低SNR区间采样概率')
+    parser.add_argument('--low-snr-split', type=float, default=-10.0,
+                        help='SNR-aware: 低/高区间分界(在snr_range内)，例如-10表示更关注[-20,-10]')
+    parser.add_argument('--grad-clip', type=float, default=1.0, help='梯度裁剪范数(<=0禁用)')
+    parser.add_argument('--focus-snr', type=float, nargs='*', default=[-15.0, -10.0],
+                        help='保存best时重点评估的SNR列表(默认[-15,-10])')
+    parser.add_argument('--focus-batches', type=int, default=8, help='每个focus SNR评估的batch数')
+    parser.add_argument('--eval-interval', type=int, default=10, help='每隔多少epoch做一次focus评估')
     # 分段训练特有参数
     parser.add_argument('--train-low', action='store_true', help='训练低SNR模型 [-20, 0]dB')
     parser.add_argument('--train-high', action='store_true', help='训练高SNR模型 [-5, 30]dB')
@@ -354,7 +654,7 @@ if __name__ == "__main__":
     elif args.model == 'dual':
         ModelClass = lambda: FDA_CVNN_Attention(attention_type='dual', se_reduction=args.se_reduction, deep_only=args.deep_only)
         model_suffix = "_dual"
-        print(f"模型: FDA_CVNN_Attention (PP-DSA 双尺度注意力: SE+FAR) ⭐")
+        print("模型: FDA_CVNN_Attention (PP-DSA 双尺度注意力: SE+FAR)")
     elif args.model == 'se':
         ModelClass = lambda: FDA_CVNN_Attention(attention_type='se', se_reduction=args.se_reduction, deep_only=args.deep_only)
         model_suffix = "_se"
@@ -389,6 +689,15 @@ if __name__ == "__main__":
                           batch_size=args.batch,
                           train_samples=args.samples,
                           lr=args.lr,
+                          loss_type=args.loss,
+                          use_snr_aware=(not args.no_snr_aware),
+                          low_snr_weight=args.low_snr_weight,
+                          low_snr_prob=args.low_snr_prob,
+                          low_snr_split=args.low_snr_split,
+                          grad_clip=args.grad_clip,
+                          focus_snr_list=args.focus_snr,
+                          focus_batches_per_snr=args.focus_batches,
+                          eval_interval=args.eval_interval,
                           model_name=f"cvnn_low_snr{model_suffix}")
     
     if args.train_high or args.train_all:
@@ -403,6 +712,10 @@ if __name__ == "__main__":
                           batch_size=args.batch,
                           train_samples=args.samples,
                           lr=args.lr,
+                          loss_type=args.loss,
+                          use_snr_aware=False,
+                          grad_clip=args.grad_clip,
+                          focus_snr_list=None,
                           model_name=f"cvnn_high_snr{model_suffix}")
     
     if args.eval:
