@@ -48,18 +48,26 @@ N_atoms = Phi.shape[1]
 print(f"字典构建完成: {Phi.shape}")
 
 # ======================== 2. 快速 MSBL 求解器 ========================
-def msbl_solver_fast(Y, max_iter=15, tol=1e-3):
+def msbl_solver_fast(Y, snr_db, max_iter=30, tol=1e-3, min_iter=5, eps=1e-12):
     """
     高度优化的 SBL 求解器
     """
     MN_dim, L_snapshots = Y.shape
     
-    # 初始化
-    gamma = np.ones(N_atoms) 
-    sigma2 = 1e-2 
-    
     # 预计算 Phi 的共轭转置
-    Phi_H = Phi.conj().T # [N_atoms, MN]
+    Phi_H = Phi.conj().T  # [N_atoms, MN]
+
+    # 初始化：用匹配滤波能量做 warm start（单快拍/高相干字典下更稳）
+    # corr_i = ||phi_i^H Y||^2 / L
+    corr = np.sum(np.abs(Phi_H @ Y) ** 2, axis=1).real / max(L_snapshots, 1)
+    gamma = corr / (np.max(corr) + eps) + eps
+
+    # 噪声方差 sigma2：与 generate_signal_consistent 的 SNR 定义对齐
+    # SNR = P_sig / P_noise, P_total = P_sig + P_noise
+    # => P_noise = P_total / (1 + 10^(SNR/10))
+    y_power = float(np.mean(np.abs(Y) ** 2))
+    snr_lin = 10 ** (float(snr_db) / 10.0)
+    sigma2 = max(y_power / (1.0 + snr_lin), float(eps))
     
     for i in range(max_iter):
         gamma_old = gamma.copy()
@@ -70,25 +78,20 @@ def msbl_solver_fast(Y, max_iter=15, tol=1e-3):
         Phi_Gamma = Phi * gamma[None, :]
         Sigma_y = Phi_Gamma @ Phi_H
         # 添加噪声对角阵
-        np.fill_diagonal(Sigma_y, np.diag(Sigma_y) + sigma2)
+        Sigma_y.flat[::MN_dim + 1] += sigma2
         
-        # 2. 求逆 (100x100)
+        # 2. 解线性方程组（比显式求逆更稳定）
         try:
-            Sigma_y_inv = inv(Sigma_y)
-        except:
-            break 
-            
-        # 3. 计算后验均值 mu
-        # (100x1) = (100x100) * (100x1)
-        Sigma_y_inv_Y = Sigma_y_inv @ Y
+            Sigma_y_inv_Y = solve(Sigma_y, Y)  # [MN, L]
+            S_inv_Phi = solve(Sigma_y, Phi)   # [MN, N_atoms]
+        except Exception:
+            break
         # (4961x1) = (4961x100) * (100x1)
         # 这里的 gamma 是 (4961,), Phi_H 是 (4961, 100)
         mu = gamma[:, None] * (Phi_H @ Sigma_y_inv_Y)
         mu_sq = np.real(np.sum(np.abs(mu)**2, axis=1)) / L_snapshots
         
         # 4. 计算 Sigma_x 的对角线元素 (Bug 修复处)
-        # S_inv_Phi [100, 4961] = [100, 100] @ [100, 4961]
-        S_inv_Phi = Sigma_y_inv @ Phi
         
         # 我们需要 diag(Phi^H @ S_inv_Phi)
         # Phi^H 是 [4961, 100], S_inv_Phi 是 [100, 4961]
@@ -100,15 +103,19 @@ def msbl_solver_fast(Y, max_iter=15, tol=1e-3):
         
         # Sigma_x_diag = gamma - gamma^2 * term_diag
         Sigma_x_diag = gamma - (gamma**2) * term_diag
+        Sigma_x_diag = np.maximum(Sigma_x_diag, 0.0)
         
         # 5. 更新 Gamma
         gamma = mu_sq + Sigma_x_diag
+        gamma = np.maximum(gamma, eps)
         
         # 6. 收敛判定
-        if np.max(np.abs(gamma - gamma_old)) < tol:
+        rel_change = np.max(np.abs(gamma - gamma_old) / (gamma_old + eps))
+        if (i + 1) >= int(min_iter) and rel_change < tol:
             break
             
-    best_idx = np.argmax(gamma)
+    # 对于单目标/单快拍，更稳妥用后验均值能量选峰
+    best_idx = int(np.argmax(mu_sq))
     return Atom_Params[best_idx]
 
 # ======================== 3. 主程序 ========================
@@ -175,7 +182,7 @@ def run_benchmark():
 
             t_start = time.time()
             try:
-                theta_est, r_est = msbl_solver_fast(Y)
+                theta_est, r_est = msbl_solver_fast(Y, snr_db=snr_db)
             except Exception as e:
                 print(f"Error: {e}")
                 theta_est, r_est = 0, 0
