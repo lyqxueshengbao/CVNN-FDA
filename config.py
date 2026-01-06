@@ -17,7 +17,7 @@ MN = M * N           # 总阵元数
 # 因此 delta_f <= c / (2 * r_max) = 75,000 Hz
 r_max = 2000.0
 r_min = 0.0
-delta_f = 70e3       # 70 kHz (保证 2000m 内无模糊, R_max = 2143m)
+delta_f = 30e3       # 70 kHz (保证 2000m 内无模糊, R_max = 2143m)
 
 # 计算并验证
 R_max = c / (2 * delta_f)  # 最大不模糊距离
