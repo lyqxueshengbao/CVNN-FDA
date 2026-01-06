@@ -31,7 +31,7 @@ theta_min = -60.0    # 最小角度 (度)
 theta_max = 60.0     # 最大角度 (度)
 
 # ================= 数据生成 =================
-L_snapshots = 10     # 快拍数 (降低以测试鲁棒性)
+L_snapshots = 1     # 快拍数 (降低以测试鲁棒性)
 num_targets = 1      # 单目标场景
 
 # ================= 训练配置 =================
@@ -43,7 +43,7 @@ val_samples = 2000       # 验证样本数
 test_samples = 2000      # 测试样本数
 
 # SNR 配置
-snr_train_min = -10      # 训练时最小SNR (dB)，扩展到负SNR
+snr_train_min = -20      # 训练时最小SNR (dB)，扩展到负SNR
 snr_train_max = 30       # 训练时最大SNR (dB)
 snr_test = 20            # 测试时固定SNR (dB)
 
