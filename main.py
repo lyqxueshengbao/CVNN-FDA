@@ -186,6 +186,18 @@ def main():
     parser.add_argument('--music-continuous', action='store_true',
                         help='(已弃用) 以前用于开启连续优化。现在为了凸显 CVNN 优势，该选项将被忽略，强制使用 Standard Baselines。')
 
+    # Training trade-off controls (range vs angle)
+    parser.add_argument('--priority', type=str, default='range',
+                        choices=['range', 'angle', 'balanced'],
+                        help='Training priority: range / angle / balanced')
+    parser.add_argument('--lambda-angle', type=float, default=None,
+                        help='Override angle weight in loss (lambda_angle)')
+    parser.add_argument('--range-weight', type=float, default=None,
+                        help='Override range weight in loss (range_weight)')
+    parser.add_argument('--best-metric', type=str, default=None,
+                        choices=['rmse_r', 'rmse_theta', 'combined'],
+                        help='Metric for selecting best checkpoint')
+
     args = parser.parse_args()
 
     if args.delta_f is not None:
@@ -219,6 +231,25 @@ def main():
 
     elif args.train:
         from train import train
+        # Default trade-off presets
+        if args.priority == 'angle':
+            default_lambda_angle = 3.0
+            default_range_weight = 1.0
+            default_best_metric = 'rmse_theta'
+        elif args.priority == 'balanced':
+            default_lambda_angle = 1.0
+            default_range_weight = 1.0
+            default_best_metric = 'combined'
+        else:
+            # Keep backward-compatible defaults
+            default_lambda_angle = 1.0
+            default_range_weight = 2.0
+            default_best_metric = 'rmse_r'
+
+        lambda_angle = args.lambda_angle if args.lambda_angle is not None else default_lambda_angle
+        range_weight = args.range_weight if args.range_weight is not None else default_range_weight
+        best_metric = args.best_metric if args.best_metric is not None else default_best_metric
+
         train(
             model_type=args.model,
             epochs=args.epochs,
@@ -229,7 +260,10 @@ def main():
             deep_only=args.deep_only,
             snapshots=args.snapshots,
             random_snapshots=args.random_snapshots,
-            loss_type=args.loss
+            loss_type=args.loss,
+            lambda_angle=lambda_angle,
+            range_weight=range_weight,
+            best_metric=best_metric,
         )
 
     elif args.benchmark:

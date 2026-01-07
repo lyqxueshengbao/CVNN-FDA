@@ -170,7 +170,10 @@ def validate(model, val_loader, criterion, device):
 def train(model_type='standard', epochs=None, lr=None, batch_size=None,
           train_samples=None, snr_train_range=None, save_best=True,
           se_reduction=4, deep_only=False, snapshots=None, random_snapshots=False,
-          loss_type='l1'):
+          loss_type='l1',
+          lambda_angle: float = 1.0,
+          range_weight: float = 2.0,
+          best_metric: str = 'rmse_r'):
     """
     主训练函数
     
@@ -241,6 +244,8 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         else:
             save_name = f"fda_cvnn_{model_type}_{save_suffix}_best.pth"
     save_path = os.path.join(cfg.checkpoint_dir, save_name)
+    print(f"loss weights: range_weight={range_weight}, lambda_angle={lambda_angle}")
+    print(f"best metric: {best_metric}")
     
     print("=" * 60)
     print("FDA-CVNN 训练")
@@ -302,7 +307,7 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         optimizer, T_max=epochs, eta_min=1e-6
     )
     # 损失函数：支持 l1, l2, complex 三种类型
-    criterion = RangeAngleLoss(lambda_angle=1.0, range_weight=2.0, loss_type=loss_type)
+    criterion = RangeAngleLoss(lambda_angle=float(lambda_angle), range_weight=float(range_weight), loss_type=loss_type)
     print(f"损失函数类型: {loss_type}")
     
     # 训练历史
@@ -312,7 +317,23 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
         'train_rmse_theta': [], 'val_rmse_theta': []
     }
     
+    def best_score(metrics: dict) -> float:
+        m = str(best_metric).lower()
+        if m == 'rmse_theta':
+            return float(metrics['rmse_theta'])
+        if m == 'rmse_r':
+            return float(metrics['rmse_r'])
+        if m == 'combined':
+            r_span = float(cfg.r_max - cfg.r_min) if float(cfg.r_max - cfg.r_min) != 0 else 1.0
+            t_span = float(cfg.theta_max - cfg.theta_min) if float(cfg.theta_max - cfg.theta_min) != 0 else 1.0
+            r_n = float(metrics['rmse_r']) / r_span
+            t_n = float(metrics['rmse_theta']) / t_span
+            return float(range_weight) * r_n + float(lambda_angle) * t_n
+        raise ValueError(f"Unknown best_metric: {best_metric} (use rmse_r / rmse_theta / combined)")
+
+    best_val_score = float('inf')
     best_val_rmse_r = float('inf')
+    best_val_rmse_theta = float('inf')
     best_epoch = 0
     
     # 创建检查点目录
@@ -350,8 +371,11 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
               f"RMSE_θ: {val_metrics['rmse_theta']:.2f}°")
         
         # 保存最佳模型
-        if save_best and val_metrics['rmse_r'] < best_val_rmse_r:
+        score = best_score(val_metrics)
+        if save_best and score < best_val_score:
+            best_val_score = score
             best_val_rmse_r = val_metrics['rmse_r']
+            best_val_rmse_theta = val_metrics['rmse_theta']
             best_epoch = epoch
             torch.save({
                 'epoch': epoch,
@@ -359,6 +383,9 @@ def train(model_type='standard', epochs=None, lr=None, batch_size=None,
                 'se_reduction': se_reduction,  # 保存 SE 压缩比
                 'deep_only': deep_only,  # 保存是否只在深层使用注意力
                 'snapshots': L,  # 保存快拍数
+                'lambda_angle': float(lambda_angle),
+                'range_weight': float(range_weight),
+                'best_metric': str(best_metric),
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_rmse_r': val_metrics['rmse_r'],
@@ -409,6 +436,13 @@ if __name__ == "__main__":
     parser.add_argument('--loss', type=str, default='l1',
                         choices=['l1', 'l2', 'complex'],
                         help='Loss type: l1 (MAE), l2 (Euclidean), complex (polar complex distance)')
+    parser.add_argument('--lambda-angle', type=float, default=1.0,
+                        help='Angle weight in loss (lambda_angle)')
+    parser.add_argument('--range-weight', type=float, default=2.0,
+                        help='Range weight in loss (range_weight)')
+    parser.add_argument('--best-metric', type=str, default='rmse_r',
+                        choices=['rmse_r', 'rmse_theta', 'combined'],
+                        help='Metric for selecting best checkpoint')
     
     args = parser.parse_args()
     
@@ -423,5 +457,8 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         train_samples=args.train_samples,
         snr_train_range=snr_range,
-        loss_type=args.loss
+        loss_type=args.loss,
+        lambda_angle=args.lambda_angle,
+        range_weight=args.range_weight,
+        best_metric=args.best_metric,
     )
