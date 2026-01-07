@@ -28,7 +28,7 @@ theta_max = cfg.theta_max
 
 SNR_dB_list = [-15, -10, -5, 0, 5, 10, 15, 20]
 L = 1
-Monte_Carlo = 50 
+Monte_Carlo = 200
 
 # ======================== 1. 字典构建 ========================
 Grid_theta = np.arange(theta_min, theta_max + 1, 1) # 1度
