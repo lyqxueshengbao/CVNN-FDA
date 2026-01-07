@@ -10,6 +10,7 @@ from numpy.linalg import norm, inv, solve
 import time
 import config as cfg
 from utils_physics import get_steering_vector
+from pathlib import Path
 
 # ======================== 参数设置 ========================
 M = cfg.M
@@ -47,15 +48,15 @@ Phi = np.array(Dictionary).T  # [MN, N_atoms] -> [100, 4961]
 N_atoms = Phi.shape[1]
 print(f"字典构建完成: {Phi.shape}")
 
+# 预计算，避免在迭代中重复构造（也方便 IDE 静态检查）
+Phi_H = Phi.conj().T  # [N_atoms, MN]
+
 # ======================== 2. 快速 MSBL 求解器 ========================
 def msbl_solver_fast(Y, snr_db, max_iter=30, tol=1e-3, min_iter=5, eps=1e-12):
     """
     高度优化的 SBL 求解器
     """
     MN_dim, L_snapshots = Y.shape
-    
-    # 预计算 Phi 的共轭转置
-    Phi_H = Phi.conj().T  # [N_atoms, MN]
 
     # 初始化：用匹配滤波能量做 warm start（单快拍/高相干字典下更稳）
     # corr_i = ||phi_i^H Y||^2 / L
@@ -205,7 +206,7 @@ def run_benchmark():
         results['avg_crlb_theta'].append(avg_crlb_theta)
         results['avg_crlb_r'].append(avg_crlb_r)
 
-        print(f"  RMSE_θ={rmse_theta:6.2f}° | RMSE_r={rmse_r:7.2f}m | Time={avg_time:6.2f}ms")
+        print(f"  RMSE_theta={rmse_theta:6.2f}deg | RMSE_r={rmse_r:7.2f}m | Time={avg_time:6.2f}ms")
 
     np.savez('msbl_fair_benchmark.npz', **results)
     
@@ -220,7 +221,16 @@ def run_benchmark():
     np.savetxt('msbl_fair_benchmark.txt', data_to_save,
                header='SNR_dB  RMSE_theta_MSBL  RMSE_r_MSBL  Time_ms  CRLB_theta  CRLB_r',
                fmt='%.6f')
-               
+
+    out_dir = Path("algorithm_comparison") / "单快拍"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savetxt(
+        out_dir / "msbl_fair_rmse_data.txt",
+        data_to_save,
+        header='SNR_dB  RMSE_theta_MSBL  RMSE_r_MSBL  Time_ms  CRLB_theta  CRLB_r',
+        fmt='%.6f',
+    )
+                
     print("\n结果已保存.")
     return results
 
